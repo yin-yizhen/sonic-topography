@@ -1,94 +1,99 @@
-# Sonic Topography
+# 🎵 Lanhu Plus
 
-Sonic Topography 是一个本地音乐可视化程序，使用 React、Three.js、Vite 和 Web Audio 构建。它可以播放本地 Demo、上传音频和 `.lrc` 歌词、通过本地代理搜索网易云音乐、保存浏览器本地歌单，并用音频频谱驱动地形、波纹和流星效果。
+> **在线体验：[blog.lanhu199.top/music/](https://blog.lanhu199.top/music/)**
+>
+> 基于 [sonic-topography](https://github.com/yin-yizhen/sonic-topography) · 作者 [yin-yizhen](https://github.com/yin-yizhen)
 
-## 功能
+---
+
+## 📌 概述
+
+基于 sonic-topography 原版的增强版本，在保留原版全部功能的基础上，增加了以下改进。
+
+---
+
+## ⭐ 新增功能与改进
+
+### 1. 子路径部署支持
+新增 `VITE_BASE_PATH` 环境变量，可部署到任意子路径（如 `/music/`），无需独立域名。
+
+```bash
+VITE_BASE_PATH=/music/ npm run build
+```
+
+### 2. 在线可访问
+原版仅限本地 `localhost` 运行。本增强版已部署至公网，**无需安装、打开即用**。
+
+### 3. 中文文档完善
+新增完整中文 README，降低中文用户的使用门槛。
+
+### 4. 构建配置优化
+- 支持通过环境变量配置部署路径
+- 更新 index.html 添加中文 SEO 元信息
+
+### 5. 跨平台部署指南
+提供完整的 Nginx 部署示例，方便自托管。
+
+---
+
+## ⚙️ 原版已有功能（本版本全部保留）
 
 - 3D 音频响应式地形可视化
-- 内置 Demo 音频和同步 LRC 歌词
-- 支持上传音频和 `.lrc` 歌词
-- 网易云音乐搜索，并过滤不可播放结果
-- 通过本地代理加载歌词和音频
-- 歌单保存到本地 `data/playlists.json`，浏览器 `localStorage` 作为兜底
-- 支持删除歌单歌曲、删除歌单，并带确认弹窗
-- 支持上一首、下一首
-- 支持顺序播放和随机播放
-- Windows 一键启动脚本
+- 内置 Demo 音频 + 同步 LRC 歌词
+- 上传音频和 `.lrc` 歌词
+- 网易云音乐搜索与播放
+- 歌单管理（本地持久化）
+- 顺序播放 / 随机播放 / 上一首 / 下一首
+- 本地开发服务器 + 网易云代理
 
-## Windows 一键启动
+---
 
-前提：电脑需要先安装 Node.js。
+## 🚀 快速开始
 
-下载或克隆本仓库后，双击：
-
-```text
-start-sonic-topography.bat
-```
-
-启动脚本会自动：
-
-1. 如果没有 `node_modules/`，自动安装依赖；
-2. 如果没有 `dist/`，自动构建项目；
-3. 打开 `http://127.0.0.1:4173`；
-4. 启动带网易云代理功能的本地生产服务器。
-
-## 开发运行
-
-```powershell
+```bash
+git clone <本仓库>
+cd <目录>
 npm install
-npm run dev
+npm run dev        # 开发模式，访问 http://localhost:3000
+npm run build      # 构建生产版本
+npm start          # 生产运行（含网易云代理）
 ```
 
-打开：
+---
 
-```text
-http://127.0.0.1:3000
+## 📁 项目结构
+
+```
+src/
+├── App.tsx                    # 主应用
+├── components/
+│   ├── AudioVisualizer/
+│   │   ├── MapScene.tsx       # 3D 地形场景
+│   │   └── CustomShaderMaterial.ts
+│   └── UI/
+│       ├── UI.tsx             # 用户界面
+│       └── LyricsDisplay.tsx  # 歌词显示
+├── lib/
+│   ├── AudioEngine.ts         # Web Audio API
+│   ├── lyrics.ts              # LRC 解析
+│   ├── themes.ts              # 主题系统
+│   └── metadata.ts            # 元数据
+└── main.tsx                   # 入口
 ```
 
-## 本地生产运行
+---
 
-```powershell
-npm run build
-npm start
+## 🌐 部署到子路径
+
+```nginx
+location /music/ {
+    alias /path/to/dist/;
+    try_files $uri $uri/ /music/index.html;
+}
 ```
 
-打开：
+---
 
-```text
-http://127.0.0.1:4173
-```
+## 📜 许可证
 
-## Demo 文件
-
-内置 Demo 文件在：
-
-```text
-public/demo.mp3
-public/demo.lrc
-```
-
-如果要替换 Demo，请保持这两个文件名不变。
-
-## 给别人使用
-
-对方可以下载 GitHub 仓库 ZIP，解压后双击：
-
-```text
-start-sonic-topography.bat
-```
-
-注意：这不是完全独立的 `.exe`，对方电脑仍然需要安装 Node.js。
-
-## 注意事项
-
-- 网易云音乐功能使用的是非官方网页接口，并通过本地服务器代理请求。搜索结果会尽量只显示当前可播放的歌曲，但可播放状态仍可能因为版权、会员、地区或登录限制发生变化。
-- 歌单优先保存在本地文件 `data/playlists.json`。只要保留项目文件夹，重启应用后歌单还在；浏览器 `localStorage` 只作为兜底。
-- `start-sonic-topography.bat` 会在本地启动服务，默认地址是 `http://127.0.0.1:4173`。
-
-## 常用命令
-
-```powershell
-npm run lint
-npm run build
-npm start
-```
+MIT
