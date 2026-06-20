@@ -1,9 +1,17 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Play, Pause, Volume2, SkipForward, SkipBack, Palette, Plus, ListMusic, Shuffle, Repeat, Trash2 } from 'lucide-react';
+import { Play, Pause, Volume2, SkipForward, SkipBack, Palette, Plus, ListMusic, Shuffle, Repeat, Trash2, Radio } from 'lucide-react';
 import { engine } from '../../lib/AudioEngine';
 import { themes } from '../../lib/themes';
 import { LyricsDisplay } from './LyricsDisplay';
 import { extractAudioMetadata, extractLyricsFromAudio } from '../../lib/metadata';
+import {
+  searchSongs,
+  getSongUrl,
+  getLyric,
+  loadPlaylists as loadTauriPlaylists,
+  savePlaylists as saveTauriPlaylists,
+} from '../../lib/tauri';
+import { Song as TauriSong, Playlist as TauriPlaylist } from '../../lib/tauri-types';
 
 interface UIProps {
   theme: string;
@@ -17,6 +25,7 @@ interface NeteaseSong {
   album: string;
   duration: number;
   fee: number;
+  sources?: string[];
 }
 
 interface SavedPlaylist {
@@ -60,6 +69,47 @@ function hasSavedSongs(playlists: SavedPlaylist[]): boolean {
   return playlists.some((playlist) => playlist.songs.length > 0);
 }
 
+function toNeteaseSong(song: TauriSong): NeteaseSong {
+  return {
+    id: song.id,
+    name: song.name,
+    artist: song.artists,
+    album: song.album,
+    duration: song.duration,
+    fee: 0,
+    sources: song.sources,
+  };
+}
+
+function toTauriSong(song: NeteaseSong): TauriSong {
+  return {
+    id: song.id,
+    name: song.name,
+    artists: song.artist,
+    album: song.album,
+    duration: song.duration,
+    picUrl: null,
+    source: song.sources?.[0] || '',
+    sources: song.sources || [],
+  };
+}
+
+function toNeteasePlaylists(playlists: TauriPlaylist[]): SavedPlaylist[] {
+  return playlists.map((playlist) => ({
+    id: playlist.id,
+    name: playlist.name,
+    songs: playlist.songs.map(toNeteaseSong),
+  }));
+}
+
+function toTauriPlaylists(playlists: SavedPlaylist[]): TauriPlaylist[] {
+  return playlists.map((playlist) => ({
+    id: playlist.id,
+    name: playlist.name,
+    songs: playlist.songs.map(toTauriSong),
+  }));
+}
+
 export function UI({ theme, onThemeChange }: UIProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const demoAudioUrl = '/demo.mp3';
@@ -78,6 +128,7 @@ export function UI({ theme, onThemeChange }: UIProps) {
   const [searchResults, setSearchResults] = useState<NeteaseSong[]>([]);
   const [searchStatus, setSearchStatus] = useState('');
   const [isSearching, setIsSearching] = useState(false);
+  const [lastSearchSource, setLastSearchSource] = useState<string>('');
   const [showPlaylistPanel, setShowPlaylistPanel] = useState(false);
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>(readSavedPlaylists);
   const [activePlaylistId, setActivePlaylistId] = useState('favorites');
@@ -87,34 +138,27 @@ export function UI({ theme, onThemeChange }: UIProps) {
   const [playQueue, setPlayQueue] = useState<NeteaseSong[]>([]);
   const [currentSongId, setCurrentSongId] = useState<number | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const [showExternalPanel, setShowExternalPanel] = useState(false);
+  const [externalUrl, setExternalUrl] = useState('');
   const hasLoadedPlaylistsRef = useRef(false);
 
   useEffect(() => {
     if (!hasLoadedPlaylistsRef.current) return;
     window.localStorage.setItem(PLAYLIST_STORAGE_KEY, JSON.stringify(playlists));
-    fetch('/api/playlists', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ playlists }),
-    }).catch((error) => {
-      console.warn('Unable to save playlists to local server:', error);
+    saveTauriPlaylists(toTauriPlaylists(playlists)).catch((error) => {
+      console.warn('Unable to save playlists via Tauri:', error);
     });
   }, [playlists]);
 
   useEffect(() => {
     const loadPlaylists = async () => {
       try {
-        const response = await fetch('/api/playlists');
-        if (!response.ok) throw new Error('Playlist request failed');
-        const data = await response.json();
-        if (Array.isArray(data.playlists) && data.playlists.length > 0) {
-          const serverPlaylists = data.playlists;
-          const browserPlaylists = readSavedPlaylists();
-          if (!hasSavedSongs(serverPlaylists) && hasSavedSongs(browserPlaylists)) {
-            setPlaylists(browserPlaylists);
-          } else {
-            setPlaylists(serverPlaylists);
-          }
+        const serverPlaylists = toNeteasePlaylists(await loadTauriPlaylists());
+        const browserPlaylists = readSavedPlaylists();
+        if (!hasSavedSongs(serverPlaylists) && hasSavedSongs(browserPlaylists)) {
+          setPlaylists(browserPlaylists);
+        } else {
+          setPlaylists(serverPlaylists);
         }
       } catch (error) {
         console.warn('Using browser playlist storage:', error);
@@ -129,22 +173,39 @@ export function UI({ theme, onThemeChange }: UIProps) {
   // Audio state poller
   useEffect(() => {
     const initEngine = async () => {
-       await engine.init(); 
+       await engine.init();
     };
     initEngine();
-    
+
     let animationFrameId: number;
+    let isVisible = document.visibilityState === 'visible';
+
+    const handleVisibility = () => {
+      isVisible = document.visibilityState === 'visible';
+      if (!isVisible && animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+        animationFrameId = 0;
+      } else if (isVisible && !animationFrameId) {
+        poll();
+      }
+    };
+
     const poll = () => {
       setIsPlaying(engine.isPlaying);
       setCurrentTime(engine.audioElement.currentTime);
       setDuration(engine.audioElement.duration || 0);
       setVolume(engine.audioElement.volume);
       setIsCapturing(engine.isCapturing);
-      animationFrameId = requestAnimationFrame(poll);
+      animationFrameId = isVisible ? requestAnimationFrame(poll) : 0;
     };
+
+    document.addEventListener('visibilitychange', handleVisibility);
     poll();
-    
-    return () => cancelAnimationFrame(animationFrameId);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      cancelAnimationFrame(animationFrameId);
+    };
   }, []);
 
   const processFiles = async (files: FileList | null) => {
@@ -242,14 +303,13 @@ export function UI({ theme, onThemeChange }: UIProps) {
     setIsSearching(true);
     setSearchStatus('Searching...');
     setSearchResults([]);
+    setLastSearchSource('');
 
     try {
-      const response = await fetch(`/api/netease/search?keywords=${encodeURIComponent(keywords)}`);
-      if (!response.ok) throw new Error('Search request failed');
-
-      const data = await response.json();
-      setSearchResults(data.songs || []);
-      setSearchStatus(data.songs?.length ? '' : 'No playable songs found');
+      const data = await searchSongs(keywords, 12);
+      setSearchResults(data.songs.map(toNeteaseSong));
+      setLastSearchSource(data.source || '');
+      setSearchStatus(data.songs.length ? '' : 'No playable songs found');
     } catch (error) {
       console.warn('Netease search failed:', error);
       setSearchStatus('Search failed');
@@ -265,25 +325,25 @@ export function UI({ theme, onThemeChange }: UIProps) {
     setLyricsText('');
     setSearchStatus('Loading song...');
 
+    const chosenSource = song.sources?.length ? song.sources[0] : '';
+
     try {
-      const [urlResponse, lyricResponse] = await Promise.all([
-        fetch(`/api/netease/url?id=${song.id}`),
-        fetch(`/api/netease/lyric?id=${song.id}`),
+      const [audioUrl, lyricData] = await Promise.all([
+        getSongUrl(song.id, chosenSource || undefined),
+        getLyric(song.id),
       ]);
 
-      const urlData = await urlResponse.json();
-      const lyricData = await lyricResponse.json();
       const lyric = lyricData.lyric || lyricData.translatedLyric || '';
       setLyricsText(lyric);
 
-      if (!urlData.url) {
+      if (!audioUrl) {
         setSearchStatus('Song unavailable, skipping...');
         playFromQueue(1, song.id);
         return;
       }
 
       engine.init();
-      engine.loadUrl(`/api/netease/audio?id=${song.id}`);
+      engine.loadUrl(audioUrl);
       engine.play();
       setSearchStatus('');
       setShowSearchPanel(false);
@@ -292,6 +352,17 @@ export function UI({ theme, onThemeChange }: UIProps) {
       setSearchStatus('Load failed, skipping...');
       playFromQueue(1, song.id);
     }
+  };
+
+  const handleLoadExternalUrl = () => {
+    const url = externalUrl.trim();
+    if (!url) return;
+
+    setTrackName('External Audio');
+    setLyricsText('');
+    engine.init();
+    engine.loadUrl(url);
+    engine.play();
   };
 
   const getCurrentQueue = () => playQueue.length > 0 ? playQueue : activePlaylist?.songs || [];
@@ -445,6 +516,7 @@ export function UI({ theme, onThemeChange }: UIProps) {
  
   const t = themes[theme] || themes['nocturnal'];
   const accentHex = `#${t.uRippleColor.getHexString()}`;
+  const isTauri = typeof window !== 'undefined' && !!(window.__TAURI_INTERNALS__ || window.__TAURI__);
 
   return (
     <div 
@@ -473,6 +545,9 @@ export function UI({ theme, onThemeChange }: UIProps) {
           <button onClick={() => setShowPlaylistPanel(true)} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
             Playlist
           </button>
+          <button onClick={() => setShowExternalPanel(true)} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
+            External
+          </button>
           
           <div className="mt-auto flex flex-col items-center gap-10">
             <button 
@@ -489,7 +564,7 @@ export function UI({ theme, onThemeChange }: UIProps) {
             >
               Upload
             </button>
-            <button 
+            <button
               onClick={() => {
                 if (engine.isCapturing) {
                   engine.stopCapture();
@@ -500,6 +575,7 @@ export function UI({ theme, onThemeChange }: UIProps) {
                   });
                 }
               }}
+              title={isTauri ? "Capture all Windows audio output via Tauri (WASAPI loopback)" : "Capture all Windows audio output (desktop audio capture); falls back to Stereo Mix or screen picker"}
               className={`uppercase tracking-[0.2em] text-[10px] transition-opacity cursor-pointer ${isCapturing ? 'opacity-100 text-[#ef4444]' : 'opacity-40 hover:opacity-100'}`}
               style={{ writingMode: 'vertical-rl' }}
             >
@@ -522,7 +598,7 @@ export function UI({ theme, onThemeChange }: UIProps) {
         AJIN.
       </div>
 
-      {/* Player Panel */}
+      {/* Search Panel */}
       {showSearchPanel && (
         <div className="absolute top-[40px] left-[100px] w-[360px] max-h-[70vh] z-50 pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.88)' }}>
           <div className="p-5 border-b border-white/10">
@@ -552,6 +628,11 @@ export function UI({ theme, onThemeChange }: UIProps) {
                 Go
               </button>
             </form>
+            {lastSearchSource && searchResults.length > 0 && (
+              <div className="mt-3 text-[10px] text-white/35">
+                via {lastSearchSource}
+              </div>
+            )}
             {searchStatus && <div className="mt-3 text-[11px] text-white/45">{searchStatus}</div>}
           </div>
           <div className="max-h-[48vh] overflow-y-auto">
@@ -582,6 +663,18 @@ export function UI({ theme, onThemeChange }: UIProps) {
                   <Plus size={15} />
                 </span>
                 <div className="mt-1 text-[11px] text-white/45 truncate">{song.artist || 'Unknown artist'} · {song.album || 'Unknown album'}</div>
+                {song.sources && song.sources.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {song.sources.map((source) => (
+                      <span
+                        key={source}
+                        className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-white/10 bg-white/5 text-[9px] uppercase tracking-wider text-white/40"
+                      >
+                        {source}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </button>
             ))}
           </div>
@@ -706,6 +799,68 @@ export function UI({ theme, onThemeChange }: UIProps) {
         </div>
       )}
 
+      {showExternalPanel && (
+        <div className="absolute top-[40px] left-[100px] w-[360px] max-h-[70vh] z-[66] pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.9)' }}>
+          <div className="p-5 border-b border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.2em] text-white/70">
+                <Radio size={15} />
+                External Audio
+              </div>
+              <button onClick={() => setShowExternalPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+            </div>
+
+            <div className="mb-4 p-3 border border-white/10 rounded-sm bg-white/5">
+              <div className="text-[11px] text-white/70 mb-2 leading-relaxed">
+                <strong className="text-white/90">System audio capture</strong><br />
+                {isTauri
+                  ? 'Click to capture everything playing through Windows — Kugou, system player, browser, etc. In Tauri the app uses a Rust WASAPI loopback capture exposed as a local HTTP stream.'
+                  : "Click to capture everything playing through Windows — Kugou, system player, browser, etc. The browser build falls back to Stereo Mix / 立体声混音 or the desktop media picker."}
+              </div>
+              <button
+                onClick={() => {
+                  if (engine.isCapturing) {
+                    engine.stopCapture();
+                    setTrackName('No track selected');
+                  } else {
+                    engine.startCapture().then(() => {
+                      if (engine.isCapturing) setTrackName('System Audio Capture');
+                    });
+                  }
+                }}
+                className={`px-3 py-1.5 text-[10px] uppercase tracking-[0.15em] rounded-sm ${isCapturing ? 'text-white bg-[#ef4444]' : 'text-black'}`}
+                style={isCapturing ? {} : { backgroundColor: accentHex }}
+              >
+                {isCapturing ? 'Stop Capture' : 'Capture System Audio'}
+              </button>
+            </div>
+
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleLoadExternalUrl();
+              }}
+            >
+              <input
+                value={externalUrl}
+                onChange={(e) => setExternalUrl(e.target.value)}
+                placeholder="External audio URL"
+                className="min-w-0 flex-1 bg-white/5 border border-white/10 rounded-sm px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
+              />
+              <button
+                type="submit"
+                disabled={!externalUrl.trim()}
+                className="px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-black rounded-sm disabled:opacity-50"
+                style={{ backgroundColor: accentHex }}
+              >
+                Load
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {pendingDelete && (
         <div className="absolute inset-0 z-[120] pointer-events-auto flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="w-[320px] border border-white/10 rounded-sm p-5" style={{ background: 'rgba(5,10,15,0.96)' }}>
@@ -753,7 +908,7 @@ export function UI({ theme, onThemeChange }: UIProps) {
             </button>
           </div>
           <div className="text-[12px] opacity-50 uppercase mb-6 tracking-wider">
-             {isCapturing ? 'System Audio Capture' : 'Local Audio'}
+             {isCapturing ? (isTauri ? 'System Audio Capture · Tauri' : 'System Audio Capture') : 'Local Audio'}
              <span className="ml-2 text-[#3b82f6] text-[10px]">&bull; {themes[theme]?.name}</span>
           </div>
 
@@ -934,8 +1089,19 @@ function FreqTriggerPanel({ action, setAction, onClose, accentHex }: { action: '
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    let isVisible = document.visibilityState === 'visible';
+    const handleVisibility = () => {
+      isVisible = document.visibilityState === 'visible';
+      if (!isVisible && animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = 0;
+      } else if (isVisible && !animationId) {
+        draw();
+      }
+    };
+
     const draw = () => {
-      animationId = requestAnimationFrame(draw);
+      animationId = isVisible ? requestAnimationFrame(draw) : 0;
       const width = canvas.width;
       const height = canvas.height;
       
@@ -1028,8 +1194,12 @@ function FreqTriggerPanel({ action, setAction, onClose, accentHex }: { action: '
           ctx.fill();
       }
     };
+    document.addEventListener('visibilitychange', handleVisibility);
     draw();
-    return () => cancelAnimationFrame(animationId);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      cancelAnimationFrame(animationId);
+    };
   }, [accentHex, triggerPoint, mode]);
 
   const handlePointerDown = (e: React.PointerEvent) => {
@@ -1177,12 +1347,32 @@ function StatsPanel({ accentHex }: { accentHex: string }) {
 
   useEffect(() => {
     let animationFrameId: number;
+    let isVisible = document.visibilityState === 'visible';
+
+    const handleVisibility = () => {
+      isVisible = document.visibilityState === 'visible';
+      if (!isVisible && animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+        animationFrameId = 0;
+      } else if (isVisible && !animationFrameId) {
+        poll();
+      }
+    };
+
     const poll = () => {
       setData(engine.getAudioData());
-      animationFrameId = requestAnimationFrame(poll);
+      animationFrameId = isVisible && (engine.isPlaying || engine.isVisualReleasing())
+        ? requestAnimationFrame(poll)
+        : 0;
     };
+
+    document.addEventListener('visibilitychange', handleVisibility);
     poll();
-    return () => cancelAnimationFrame(animationFrameId);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      cancelAnimationFrame(animationFrameId);
+    };
   }, []);
 
   return (

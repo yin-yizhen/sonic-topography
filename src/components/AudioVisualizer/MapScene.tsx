@@ -12,7 +12,13 @@ export function MapScene({ theme = 'nocturnal' }: { theme?: string }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const materialRef = useRef<any>(null);
   const { clock } = useThree();
-  
+
+  // Visibility / lifecycle refs
+  const isVisibleRef = useRef(document.visibilityState === 'visible');
+  const meteorColorRef = useRef(new THREE.Color());
+  const whiteColorRef = useRef(new THREE.Color(0xffffff));
+  const ripplesDirtyRef = useRef(true);
+
   const gridSize = 160;
   const spacing = 1.05;
   const count = gridSize * gridSize;
@@ -47,14 +53,14 @@ export function MapScene({ theme = 'nocturnal' }: { theme?: string }) {
 
   const addRipple = (x: number, y: number, strength: number, isWhite: boolean = false) => {
     const idx = rippleIndex.current;
-    ripplesRef.current[idx] = {
-      pos: new THREE.Vector2(x, y),
-      time: clock.getElapsedTime(),
-      strength,
-      isActive: 1,
-      rippleType: isWhite ? 1 : 0
-    } as any;
+    const ripple = ripplesRef.current[idx];
+    ripple.pos.set(x, y);
+    ripple.time = clock.getElapsedTime();
+    ripple.strength = strength;
+    ripple.isActive = 1;
+    (ripple as any).rippleType = isWhite ? 1 : 0;
     rippleIndex.current = (idx + 1) % 10;
+    ripplesDirtyRef.current = true;
   };
 
   const fogRef = useRef<THREE.Fog>(null);
@@ -128,6 +134,15 @@ export function MapScene({ theme = 'nocturnal' }: { theme?: string }) {
      meteorIndex.current = (idx + 1) % MAX_METEORS;
   };
   
+  // Pause rendering when the tab/window is hidden to save GPU/CPU.
+  useEffect(() => {
+    const handleVisibility = () => {
+      isVisibleRef.current = document.visibilityState === 'visible';
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
+
   // Wire up audio engine beat detection
   useEffect(() => {
     engine.onFreqTrigger = (strength, mode, action) => {
@@ -151,115 +166,149 @@ export function MapScene({ theme = 'nocturnal' }: { theme?: string }) {
     };
   }, [theme]);
 
+  const hasActiveVisuals = () => {
+    const hasRipples = ripplesRef.current.some((r) => r.isActive > 0);
+    const hasMeteors = meteorsRef.current.some((m) => m.active);
+    const hasParticles = particlesRef.current.some((p) => p.active);
+    return hasRipples || hasMeteors || hasParticles;
+  };
+
+  // Epsilon helpers to avoid uploading uniforms that haven't meaningfully changed.
+  const EPS = 0.0001;
+  const setFloat = (mat: any, key: string, value: number) => {
+    if (Math.abs(mat[key] - value) > EPS) mat[key] = value;
+  };
+  const setColor = (mat: any, key: string, target: THREE.Color, speed: number) => {
+    if (mat[key].getHex() !== target.getHex()) {
+      mat[key].lerp(target, speed);
+    }
+  };
+
   useFrame((state, delta) => {
     if (!materialRef.current) return;
+    if (!isVisibleRef.current) return;
+
     const mat = materialRef.current;
-    const data = engine.getAudioData();
     const t = themes[theme] || themes['nocturnal'];
+
+    // Skip the heavy audio-driven updates when nothing is playing and no
+    // visual effects (ripples, meteors, particles) are active.
+    const shouldRenderScene = engine.isPlaying || engine.isVisualReleasing() || hasActiveVisuals();
+    if (!shouldRenderScene) return;
+
+    const data = engine.getAudioData();
 
     // Smoothly transition colors
     const lerpSpeed = 3.0 * delta;
-    mat.uBaseColor1.lerp(t.uBaseColor1, lerpSpeed);
-    mat.uBaseColor2.lerp(t.uBaseColor2, lerpSpeed);
-    mat.uCoolCore.lerp(t.uCoolCore, lerpSpeed);
-    mat.uCoolEdge.lerp(t.uCoolEdge, lerpSpeed);
-    mat.uWarmCore.lerp(t.uWarmCore, lerpSpeed);
-    mat.uWarmEdge.lerp(t.uWarmEdge, lerpSpeed);
-    mat.uRippleColor.lerp(t.uRippleColor, lerpSpeed);
-    mat.uGlowIntensity = THREE.MathUtils.lerp(mat.uGlowIntensity, t.uGlowIntensity, lerpSpeed);
+    setColor(mat, 'uBaseColor1', t.uBaseColor1, lerpSpeed);
+    setColor(mat, 'uBaseColor2', t.uBaseColor2, lerpSpeed);
+    setColor(mat, 'uCoolCore', t.uCoolCore, lerpSpeed);
+    setColor(mat, 'uCoolEdge', t.uCoolEdge, lerpSpeed);
+    setColor(mat, 'uWarmCore', t.uWarmCore, lerpSpeed);
+    setColor(mat, 'uWarmEdge', t.uWarmEdge, lerpSpeed);
+    setColor(mat, 'uRippleColor', t.uRippleColor, lerpSpeed);
+    setFloat(mat, 'uGlowIntensity', THREE.MathUtils.lerp(mat.uGlowIntensity, t.uGlowIntensity, lerpSpeed));
 
     if (fogRef.current) {
-        fogRef.current.color.lerp(t.uBaseColor1, lerpSpeed);
+      fogRef.current.color.lerp(t.uBaseColor1, lerpSpeed);
     }
 
     mat.uTime = state.clock.getElapsedTime();
-    mat.uBass = data.bass;
-    mat.uMid = data.mid;
-    mat.uTreble = data.treble;
-    mat.uEnergy = data.energy;
-    
-    mat.uSubBass = data.subBass;
-    mat.uLowMid = data.lowMid;
-    mat.uHighMid = data.highMid;
-    mat.uPresence = data.presence;
-    mat.uBrilliance = data.brilliance;
-    mat.uAir = data.air;
+    setFloat(mat, 'uBass', data.bass);
+    setFloat(mat, 'uMid', data.mid);
+    setFloat(mat, 'uTreble', data.treble);
+    setFloat(mat, 'uEnergy', data.energy);
 
-    mat.uWarmth = data.warmth;
-    mat.uBrightness = data.brightness;
-    mat.uSharpness = data.sharpness;
-    mat.uSmoothness = data.smoothness;
-    mat.uDensity = data.density;
-    mat.uSpectralCentroid = data.spectralCentroid;
-    
-    // Pass ripples
-    mat.uRipples = ripplesRef.current;
+    setFloat(mat, 'uSubBass', data.subBass);
+    setFloat(mat, 'uLowMid', data.lowMid);
+    setFloat(mat, 'uHighMid', data.highMid);
+    setFloat(mat, 'uPresence', data.presence);
+    setFloat(mat, 'uBrilliance', data.brilliance);
+    setFloat(mat, 'uAir', data.air);
+
+    setFloat(mat, 'uWarmth', data.warmth);
+    setFloat(mat, 'uBrightness', data.brightness);
+    setFloat(mat, 'uSharpness', data.sharpness);
+    setFloat(mat, 'uSmoothness', data.smoothness);
+    setFloat(mat, 'uDensity', data.density);
+    setFloat(mat, 'uSpectralCentroid', data.spectralCentroid);
+
+    // Pass ripples only when the buffer has changed.
+    if (ripplesDirtyRef.current) {
+      mat.uRipples = ripplesRef.current;
+      ripplesDirtyRef.current = false;
+    }
 
     // Update meteors
     if (meteorMeshRef.current) {
-        
-        if (meteorMatRef.current) {
-            const mColor = new THREE.Color().copy(t.uWarmCore).lerp(new THREE.Color(0xffffff), 0.7);
-            meteorMatRef.current.color.lerp(mColor, lerpSpeed);
-        }
+      if (meteorMatRef.current) {
+        const mColor = meteorColorRef.current.copy(t.uWarmCore).lerp(whiteColorRef.current, 0.7);
+        meteorMatRef.current.color.lerp(mColor, lerpSpeed);
+      }
 
-        for (let i = 0; i < MAX_METEORS; i++) {
-            const m = meteorsRef.current[i];
-            if (!m.active) {
-                dummyPosition.set(0, -1000, 0);
-                dummyScale.set(0, 0, 0);
-                dummyMatrix.compose(dummyPosition, dummyRotation, dummyScale);
-                meteorMeshRef.current.setMatrixAt(i, dummyMatrix);
-            } else {
-                m.y -= m.speed * 60 * delta; // falling translation (faster)
-                if (m.y <= 0) {
-                    m.active = false;
-                    addRipple(m.x, m.z, Math.min(m.strength * 1.0, 1.2), true); // miniature white wave impact
-                    // Impact particles
-                    for (let pIndex = 0; pIndex < 10; pIndex++) spawnParticle(m.x, 0.5, m.z, m.speed * 1.5);
-                }
-                dummyPosition.set(m.x, Math.max(0, m.y), m.z);
-                dummyScale.set(1.5, 1.5, 1.5);
-                dummyMatrix.compose(dummyPosition, dummyRotation, dummyScale);
-                meteorMeshRef.current.setMatrixAt(i, dummyMatrix);
-                
-                if (m.y > 0 && Math.random() > 0.3) {
-                   spawnParticle(m.x, m.y, m.z, m.speed * 0.2); // trail
-                }
-            }
+      for (let i = 0; i < MAX_METEORS; i++) {
+        const m = meteorsRef.current[i];
+        if (!m.active) {
+          dummyPosition.set(0, -1000, 0);
+          dummyScale.set(0, 0, 0);
+          dummyMatrix.compose(dummyPosition, dummyRotation, dummyScale);
+          meteorMeshRef.current.setMatrixAt(i, dummyMatrix);
+        } else {
+          m.y -= m.speed * 60 * delta; // falling translation (faster)
+          if (m.y <= 0) {
+            m.active = false;
+            addRipple(m.x, m.z, Math.min(m.strength * 1.0, 1.2), true); // miniature white wave impact
+            // Impact particles
+            for (let pIndex = 0; pIndex < 10; pIndex++) spawnParticle(m.x, 0.5, m.z, m.speed * 1.5);
+          }
+          dummyPosition.set(m.x, Math.max(0, m.y), m.z);
+          dummyScale.set(1.5, 1.5, 1.5);
+          dummyMatrix.compose(dummyPosition, dummyRotation, dummyScale);
+          meteorMeshRef.current.setMatrixAt(i, dummyMatrix);
+
+          if (m.y > 0 && Math.random() > 0.3) {
+            spawnParticle(m.x, m.y, m.z, m.speed * 0.2); // trail
+          }
         }
-        meteorMeshRef.current.instanceMatrix.needsUpdate = true;
+      }
+      meteorMeshRef.current.instanceMatrix.needsUpdate = true;
     }
-    
+
     // Update particles
     if (particleMeshRef.current) {
-        if (particleMatRef.current) particleMatRef.current.color.copy(meteorMatRef.current ? meteorMatRef.current.color : new THREE.Color(0xffffff));
-        
-        for (let i = 0; i < MAX_PARTICLES; i++) {
-           const p = particlesRef.current[i];
-           if (!p.active) {
-                dummyPosition.set(0, -1000, 0);
-                dummyScale.set(0, 0, 0);
-                dummyMatrix.compose(dummyPosition, dummyRotation, dummyScale);
-                particleMeshRef.current.setMatrixAt(i, dummyMatrix);
-           } else {
-                p.life += delta;
-                if (p.life >= p.maxLife) {
-                    p.active = false;
-                    dummyScale.set(0, 0, 0);
-                } else {
-                    p.x += p.vx * delta * 10;
-                    p.y += p.vy * delta * 10;
-                    p.z += p.vz * delta * 10;
-                    const s = p.scale * (1.0 - (p.life / p.maxLife));
-                    dummyPosition.set(p.x, p.y, p.z);
-                    dummyScale.set(s, s, s);
-                }
-                dummyMatrix.compose(dummyPosition, dummyRotation, dummyScale);
-                particleMeshRef.current.setMatrixAt(i, dummyMatrix);
-           }
+      if (particleMatRef.current) {
+        if (meteorMatRef.current) {
+          particleMatRef.current.color.copy(meteorMatRef.current.color);
+        } else {
+          particleMatRef.current.color.copy(whiteColorRef.current);
         }
-        particleMeshRef.current.instanceMatrix.needsUpdate = true;
+      }
+
+      for (let i = 0; i < MAX_PARTICLES; i++) {
+        const p = particlesRef.current[i];
+        if (!p.active) {
+          dummyPosition.set(0, -1000, 0);
+          dummyScale.set(0, 0, 0);
+          dummyMatrix.compose(dummyPosition, dummyRotation, dummyScale);
+          particleMeshRef.current.setMatrixAt(i, dummyMatrix);
+        } else {
+          p.life += delta;
+          if (p.life >= p.maxLife) {
+            p.active = false;
+            dummyScale.set(0, 0, 0);
+          } else {
+            p.x += p.vx * delta * 10;
+            p.y += p.vy * delta * 10;
+            p.z += p.vz * delta * 10;
+            const s = p.scale * (1.0 - (p.life / p.maxLife));
+            dummyPosition.set(p.x, p.y, p.z);
+            dummyScale.set(s, s, s);
+          }
+          dummyMatrix.compose(dummyPosition, dummyRotation, dummyScale);
+          particleMeshRef.current.setMatrixAt(i, dummyMatrix);
+        }
+      }
+      particleMeshRef.current.instanceMatrix.needsUpdate = true;
     }
   });
 

@@ -1,4 +1,8 @@
 import { AudioData } from '../types';
+import {
+  startSystemAudioCapture,
+  stopSystemAudioCapture,
+} from './tauri';
 
 export type TriggerPreset = 'Auto Beat' | 'Advanced';
 
@@ -119,37 +123,135 @@ export class AudioEngine {
     this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
   }
 
+  private isTauri(): boolean {
+    if (typeof window === 'undefined') return false;
+    return !!(window.__TAURI_INTERNALS__ || window.__TAURI__);
+  }
+
+  private async tryGetLoopbackStream(): Promise<MediaStream | null> {
+    // On Windows, "Stereo Mix" / "立体声混音" is a loopback input device that captures
+    // everything playing through the default output. Try to use it automatically
+    // before falling back to the desktop media picker.
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const loopback = devices.find(
+        d => d.kind === 'audioinput' &&
+          /(stereo mix|立体声混音|loopback|what u hear|wave out|主声音捕获)/i.test(d.label)
+      );
+      if (loopback && loopback.deviceId) {
+        return navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: { exact: loopback.deviceId },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+        });
+      }
+    } catch (e) {
+      console.warn('Auto loopback capture failed:', e);
+    }
+    return null;
+  }
+
   public async startCapture() {
     await this.init();
     if (this.audioCtx?.state === 'suspended') {
       this.audioCtx.resume();
     }
-    
+
+    // In Tauri on Windows, ask the Rust side to capture the default render
+    // endpoint and expose it as a local HTTP WAV stream. The existing audio
+    // element is already wired to the analyser, so visualization continues
+    // to work with almost no frontend changes.
+    if (this.isTauri()) {
+      try {
+        if (this.pauseTimeout) {
+          clearTimeout(this.pauseTimeout);
+          this.pauseTimeout = null;
+        }
+
+        this.audioElement.pause();
+        this.beginVisualRelease();
+
+        const { url } = await startSystemAudioCapture();
+
+        this.audioElement.src = url;
+        this.audioElement.load();
+
+        if (this.fadeNode && this.audioCtx) {
+          this.fadeNode.gain.cancelScheduledValues(this.audioCtx.currentTime);
+          this.fadeNode.gain.setValueAtTime(0.001, this.audioCtx.currentTime);
+          this.fadeNode.gain.linearRampToValueAtTime(
+            1.0,
+            this.audioCtx.currentTime + this.fadeTime
+          );
+        }
+
+        await this.audioElement.play();
+
+        this.isCapturing = true;
+        this.isPlaying = true;
+
+        this.audioElement.addEventListener('ended', () => {
+          this.isCapturing = false;
+          this.isPlaying = false;
+        });
+      } catch (e) {
+        console.warn('Tauri system audio capture failed:', e);
+        this.isCapturing = false;
+        this.isPlaying = false;
+      }
+      return;
+    }
+
     this.pause(); // stop file playback if any
 
     try {
-      this.captureStream = await navigator.mediaDevices.getDisplayMedia({ 
-        audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-        }, 
-        video: true 
-      });
-      if (!this.audioCtx || !this.analyser) return;
+      // 1. Try Stereo Mix / loopback input device.
+      this.captureStream = await this.tryGetLoopbackStream();
+
+      // 2. Last resort: ask the user via the desktop media picker.
+      if (!this.captureStream) {
+        try {
+          this.captureStream = await navigator.mediaDevices.getDisplayMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+            video: false as unknown as MediaTrackConstraints,
+          });
+        } catch {
+          this.captureStream = await navigator.mediaDevices.getDisplayMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+            video: true,
+          });
+        }
+      }
+
+      if (!this.audioCtx || !this.analyser || !this.captureStream) return;
 
       if (this.captureSource) {
         this.captureSource.disconnect();
       }
 
+      // Stop any video tracks to save resources; keep audio tracks.
+      this.captureStream.getVideoTracks().forEach(track => track.stop());
+
       this.captureSource = this.audioCtx.createMediaStreamSource(this.captureStream);
       // Connect directly to analyser, NOT to destination (avoids feedback)
       this.captureSource.connect(this.analyser);
-      
+
       this.isCapturing = true;
       this.isPlaying = true;
 
-      this.captureStream.getVideoTracks()[0]?.addEventListener('ended', () => {
+      this.captureStream.getAudioTracks()[0]?.addEventListener('ended', () => {
          this.stopCapture();
       });
 
@@ -162,6 +264,12 @@ export class AudioEngine {
 
   public stopCapture() {
     this.beginVisualRelease();
+    if (this.isTauri()) {
+      stopSystemAudioCapture().catch((e) => {
+        console.warn('Failed to stop Tauri system audio capture:', e);
+      });
+      this.audioElement.pause();
+    }
     if (this.captureStream) {
       this.captureStream.getTracks().forEach(track => track.stop());
       this.captureStream = null;
@@ -316,12 +424,35 @@ export class AudioEngine {
       }
   }
 
+  private lastAnalysisTime = 0;
+  private cachedAudioData: AudioData | null = null;
+
   public getRawFrequencyData(): Uint8Array {
+    // Ensure frequency data is current for this animation frame.
+    if (performance.now() - this.lastAnalysisTime >= 1.0) {
+      this.analyzeFrame();
+    }
     return this.dataArray;
   }
 
-
   public getAudioData(): AudioData {
+    if (!this.analyser) {
+      return { ...this.smoothedData };
+    }
+
+    const now = performance.now();
+    if (now - this.lastAnalysisTime < 1.0 && this.cachedAudioData) {
+      return { ...this.cachedAudioData };
+    }
+
+    return this.analyzeFrame();
+  }
+
+  public isVisualReleasing(): boolean {
+    return performance.now() < this.visualReleaseUntil;
+  }
+
+  private analyzeFrame(): AudioData {
     if (!this.analyser) {
       return { ...this.smoothedData };
     }
@@ -454,6 +585,9 @@ export class AudioEngine {
     this.smoothedData.smoothness += (smoothnessVal - this.smoothedData.smoothness) * dt;
     this.smoothedData.density += (density - this.smoothedData.density) * dt;
     this.smoothedData.spectralCentroid += (spectralCentroid - this.smoothedData.spectralCentroid) * dt;
+
+    this.lastAnalysisTime = performance.now();
+    this.cachedAudioData = this.smoothedData;
 
     return { ...this.smoothedData };
   }

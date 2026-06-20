@@ -8,3 +8,9 @@ docs/
 *.log
 .env*
 !.env.example
+.trae/
+
+# Rust / Tauri
+src-tauri/target/
+.cargo-ok
+*.rs.bk
