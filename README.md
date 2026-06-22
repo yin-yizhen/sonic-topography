@@ -1,94 +1,111 @@
 # Sonic Topography
 
-Sonic Topography 是一个本地音乐可视化程序，使用 React、Three.js、Vite 和 Web Audio 构建。它可以播放本地 Demo、上传音频和 `.lrc` 歌词、通过本地代理搜索网易云音乐、保存浏览器本地歌单，并用音频频谱驱动地形、波纹和流星效果。
+Sonic Topography is a local music visualizer built with React, Three.js, Vite, and the Web Audio API. It plays local demos, uploads audio and `.lrc` lyrics, searches NetEase Cloud Music via a local proxy, saves browser-local playlists, and drives terrain, ripple, and meteor effects with audio frequency data.
 
-## 功能
+## ✨ Features
 
-- 3D 音频响应式地形可视化
-- 内置 Demo 音频和同步 LRC 歌词
-- 支持上传音频和 `.lrc` 歌词
-- 网易云音乐搜索，并过滤不可播放结果
-- 通过本地代理加载歌词和音频
-- 歌单保存到本地 `data/playlists.json`，浏览器 `localStorage` 作为兜底
-- 支持删除歌单歌曲、删除歌单，并带确认弹窗
-- 支持上一首、下一首
-- 支持顺序播放和随机播放
-- Windows 一键启动脚本
+- **3D Audio-Reactive Terrain Visualization** — Watch a living landscape pulse and flow with your music
+- **Built-in Demo** — Comes with a demo track and synchronized LRC lyrics
+- **Audio File Upload** — Drag & drop MP3, WAV, FLAC files with optional `.lrc` lyrics
+- **NetEase Cloud Music Search** — Search and stream millions of songs, with unplayable results filtered out
+- **Local Proxy Loading** — Lyrics and audio load through a local server proxy
+- **Playlist Management** — Playlists saved to `data/playlists.json` (localStorage as fallback)
+- **Full Playback Controls** — Previous/next track, sequential & shuffle play, delete songs/playlists with confirmation
+- **Interactive Terrain** — Click & hold to create ripples, drag to rotate, scroll to zoom
+- **Multiple Themes** — Nocturnal, Neon Tokyo, Cyber Forest, Minimal Monochrome
+- **First-Run Onboarding Tutorial** — Guided English walkthrough for new users
+- **Windows One-Click Launch** — Batch script for easy startup
 
-## Windows 一键启动
+## 🚀 Quick Start
 
-前提：电脑需要先安装 Node.js。
+### Prerequisites
+- Node.js installed on your machine
 
-下载或克隆本仓库后，双击：
-
+### Windows One-Click Launch
+After downloading or cloning this repository, double-click:
 ```text
 start-sonic-topography.bat
 ```
 
-启动脚本会自动：
+The script automatically:
+1. Installs dependencies if `node_modules/` is missing
+2. Builds the project if `dist/` is missing
+3. Opens `http://127.0.0.1:4173`
+4. Starts the local production server with NetEase proxy
 
-1. 如果没有 `node_modules/`，自动安装依赖；
-2. 如果没有 `dist/`，自动构建项目；
-3. 打开 `http://127.0.0.1:4173`；
-4. 启动带网易云代理功能的本地生产服务器。
-
-## 开发运行
-
-```powershell
+### Development Mode
+```bash
 npm install
 npm run dev
 ```
-
-打开：
-
+Then open:
 ```text
 http://127.0.0.1:3000
 ```
 
-## 本地生产运行
-
-```powershell
+### Production Mode
+```bash
+npm install
 npm run build
 npm start
 ```
-
-打开：
-
+Then open:
 ```text
 http://127.0.0.1:4173
 ```
 
-## Demo 文件
+## 🎵 Demo Files
 
-内置 Demo 文件在：
-
+Built-in demo files are located at:
 ```text
 public/demo.mp3
 public/demo.lrc
 ```
 
-如果要替换 Demo，请保持这两个文件名不变。
+To replace the demo, keep these filenames unchanged.
 
-## 给别人使用
+## 📦 Sharing with Others
 
-对方可以下载 GitHub 仓库 ZIP，解压后双击：
-
+The recipient can download the GitHub repository ZIP, extract it, and double-click:
 ```text
 start-sonic-topography.bat
 ```
 
-注意：这不是完全独立的 `.exe`，对方电脑仍然需要安装 Node.js。
+> **Note:** This is not a standalone `.exe`. The recipient still needs Node.js installed.
 
-## 注意事项
+## 🎯 Onboarding Tutorial
 
-- 网易云音乐功能使用的是非官方网页接口，并通过本地服务器代理请求。搜索结果会尽量只显示当前可播放的歌曲，但可播放状态仍可能因为版权、会员、地区或登录限制发生变化。
-- 歌单优先保存在本地文件 `data/playlists.json`。只要保留项目文件夹，重启应用后歌单还在；浏览器 `localStorage` 只作为兜底。
-- `start-sonic-topography.bat` 会在本地启动服务，默认地址是 `http://127.0.0.1:4173`。
+First-time visitors are greeted with a 5-step interactive tutorial covering:
+1. Welcome & overview of audio-reactive visualization
+2. How to start the built-in demo
+3. Playing your own music files (drag & drop)
+4. Searching NetEase Cloud Music
+5. Interacting with the 3D terrain
 
-## 常用命令
+The tutorial only appears once and is remembered via localStorage.
 
-```powershell
-npm run lint
-npm run build
-npm start
+## ⚠️ Notes
+
+- The NetEase Cloud Music feature uses an unofficial web API, proxied through the local server. Search results try to show only currently playable songs, but playability may change due to copyright, membership, regional, or login restrictions.
+- Playlists are primarily saved to the local file `data/playlists.json`. As long as you keep the project folder, your playlists persist; browser `localStorage` serves as a fallback.
+- `start-sonic-topography.bat` starts a local service at `http://127.0.0.1:4173` by default.
+
+## 🛠️ Commands
+
+```bash
+npm run lint      # TypeScript type check
+npm run build     # Build for production
+npm start         # Start production server
 ```
+
+## 🔗 Original Project
+
+This project is forked from the original **Sonic Topography** by [yin-yizhen](https://github.com/yin-yizhen):
+
+👉 [https://github.com/yin-yizhen/sonic-topography](https://github.com/yin-yizhen/sonic-topography)
+
+Full credit for the core visualization engine, audio analysis, and original design goes to the original author.
+
+---
+
+*Made with 🎵 and Three.js*
