@@ -1,4 +1,4 @@
-package sonicserver
+﻿package sonicserver
 
 import (
 	"bytes"
@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-func TestNormalizeNeteaseCookie(t *testing.T) {
+func TestNormalizeQqMusicCookie(t *testing.T) {
 	input := " a=1;; \n\n b=2; \r\n c=3;;; "
-	got := NormalizeNeteaseCookie(input)
+	got := NormalizeQqMusicCookie(input)
 	want := "a=1; b=2; c=3"
 	if got != want {
-		t.Fatalf("NormalizeNeteaseCookie() = %q, want %q", got, want)
+		t.Fatalf("NormalizeQqMusicCookie() = %q, want %q", got, want)
 	}
 }
 
@@ -32,7 +32,7 @@ func TestPlaylistsAPIReadsAndWritesUserDataFile(t *testing.T) {
 	dir := t.TempDir()
 	server := New(Config{PlaylistsPath: filepath.Join(dir, "playlists.json")})
 
-	body := bytes.NewBufferString(`{"playlists":[{"id":"mine","name":"我的歌单","songs":[{"id":123,"name":"Song"}]}]}`)
+	body := bytes.NewBufferString(`{"playlists":[{"id":"mine","name":"我的歌单","songs":[{"id":"001ABC","name":"Song"}]}]}`)
 	put := httptest.NewRequest(http.MethodPut, "/api/playlists", body)
 	put.Header.Set("Content-Type", "application/json")
 	putRecorder := httptest.NewRecorder()

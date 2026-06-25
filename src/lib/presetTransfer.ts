@@ -1,4 +1,4 @@
-import {
+﻿import {
   ACTIVE_CUSTOM_THEME_STORAGE_KEY,
   ACTIVE_THEME_STORAGE_KEY,
   BUILT_IN_THEME_IDS,
@@ -14,13 +14,13 @@ import {
 } from './themes';
 import { GROUND_EQ_STORAGE_KEY, normalizeGroundEqSettings, type StoredGroundEqSettings } from './groundEqSettings';
 import { TRIGGER_SETTINGS_STORAGE_KEY, normalizeTriggerConfig, type StoredTriggerSettings } from './triggerSettings';
-import { NETEASE_COOKIE_STORAGE_KEY, normalizeNeteaseCookie } from './neteaseCookie';
+import { QQ_MUSIC_COOKIE_STORAGE_KEY, normalizeQqMusicCookie } from './qqMusicCookie';
 
 export const PRESET_TRANSFER_VERSION = 1;
 export const PLAYLIST_STORAGE_KEY = 'sonic-topography-playlists-v1';
 
 export interface TransferSong {
-  id: number;
+  id: string;
   name: string;
   artist: string;
   album: string;
@@ -46,12 +46,12 @@ export interface PresetTransferPackage {
     activeCustomThemeId: string;
     activeThemeId: string;
     themeRotation: ThemeRotationSettings;
-    neteaseCookie?: string;
+    qqMusicCookie?: string;
   };
 }
 
 export interface CreatePresetTransferOptions {
-  includeNeteaseCookie?: boolean;
+  includeQqMusicCookie?: boolean;
 }
 
 function readJsonStorage(key: string) {
@@ -62,9 +62,9 @@ function readJsonStorage(key: string) {
 }
 
 function normalizeSong(value: any): TransferSong | null {
-  const id = Number(value?.id);
+  const id = String(value?.id || '').trim();
   const name = String(value?.name || '').trim();
-  if (!Number.isFinite(id) || !name) return null;
+  if (!id || !name) return null;
 
   return {
     id,
@@ -146,8 +146,8 @@ export function normalizePresetTransferPackage(value: unknown): PresetTransferPa
     },
   };
 
-  const cookie = normalizeNeteaseCookie(input.data.neteaseCookie);
-  if (cookie) normalized.data.neteaseCookie = cookie;
+  const cookie = normalizeQqMusicCookie(input.data.qqMusicCookie);
+  if (cookie) normalized.data.qqMusicCookie = cookie;
 
   return normalized;
 }
@@ -177,9 +177,9 @@ export function createPresetTransferPackage(options: CreatePresetTransferOptions
     },
   };
 
-  if (options.includeNeteaseCookie && typeof window !== 'undefined') {
-    const cookie = normalizeNeteaseCookie(window.localStorage.getItem(NETEASE_COOKIE_STORAGE_KEY));
-    if (cookie) presetPackage.data.neteaseCookie = cookie;
+  if (options.includeQqMusicCookie && typeof window !== 'undefined') {
+    const cookie = normalizeQqMusicCookie(window.localStorage.getItem(QQ_MUSIC_COOKIE_STORAGE_KEY));
+    if (cookie) presetPackage.data.qqMusicCookie = cookie;
   }
 
   return normalizePresetTransferPackage(presetPackage);
@@ -198,10 +198,10 @@ export function writePresetTransferPackage(presetPackage: PresetTransferPackage)
   window.localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, data.activeThemeId);
   window.localStorage.setItem(THEME_ROTATION_STORAGE_KEY, JSON.stringify(data.themeRotation));
 
-  if (data.neteaseCookie) {
-    window.localStorage.setItem(NETEASE_COOKIE_STORAGE_KEY, data.neteaseCookie);
+  if (data.qqMusicCookie) {
+    window.localStorage.setItem(QQ_MUSIC_COOKIE_STORAGE_KEY, data.qqMusicCookie);
   } else {
-    window.localStorage.removeItem(NETEASE_COOKIE_STORAGE_KEY);
+    window.localStorage.removeItem(QQ_MUSIC_COOKIE_STORAGE_KEY);
   }
 
   return normalized;

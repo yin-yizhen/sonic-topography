@@ -12,10 +12,10 @@ import {
 import { LyricsDisplay } from './LyricsDisplay';
 import { extractAudioMetadata, extractLyricsFromAudio } from '../../lib/metadata';
 import {
-  createNeteaseCookieHeaders,
-  readNeteaseCookieStorage,
-  writeNeteaseCookieStorage,
-} from '../../lib/neteaseCookie';
+  createQqMusicCookieHeaders,
+  readQqMusicCookieStorage,
+  writeQqMusicCookieStorage,
+} from '../../lib/qqMusicCookie';
 import {
   readTriggerSettingsStorage,
   writeTriggerSettingsStorage,
@@ -42,8 +42,8 @@ interface UIProps {
   onGroundEqSettingsChange: (settings: StoredGroundEqSettings) => void;
 }
 
-interface NeteaseSong {
-  id: number;
+interface QqMusicSong {
+  id: string;
   name: string;
   artist: string;
   album: string;
@@ -54,20 +54,23 @@ interface NeteaseSong {
 interface SavedPlaylist {
   id: string;
   name: string;
-  songs: NeteaseSong[];
+  songs: QqMusicSong[];
 }
 
-interface NeteasePlaylistSummary {
-  id: number;
+interface QqMusicPlaylistSummary {
+  id: string;
   name: string;
-  trackCount: number;
+  trackCount?: number;
+  count?: number;
+  cover?: string;
 }
 
 type PlayMode = 'sequence' | 'shuffle';
 type OptionsTab = 'Pulse' | 'Meteor' | 'GroundEq' | 'Color' | 'Cookie';
-type NeteaseCloudTab = 'liked' | 'playlists' | 'daily';
+type QqMusicCloudTab = 'liked' | 'playlists' | 'daily';
+type PlaylistPanelSource = 'qq' | 'local';
 type PendingDelete =
-  | { type: 'song'; playlistId: string; songId: number; label: string }
+  | { type: 'song'; playlistId: string; songId: string; label: string }
   | { type: 'playlist'; playlistId: string; label: string };
 
 const PLAYLIST_STORAGE_KEY = 'sonic-topography-playlists-v1';
@@ -110,6 +113,12 @@ function readSavedPlaylists(): SavedPlaylist[] {
 
 function hasSavedSongs(playlists: SavedPlaylist[]): boolean {
   return playlists.some((playlist) => playlist.songs.length > 0);
+}
+
+function getPlaylistDisplayName(playlist: Pick<SavedPlaylist, 'id' | 'name'>): string {
+  if (playlist.id === 'favorites') return '喜欢';
+  if (playlist.id === 'visual-set') return '视觉集';
+  return playlist.name;
 }
 
 function applyStoredTriggerConfig(config: typeof engine.pulseTrigger, stored?: Partial<StoredTriggerConfig>) {
@@ -161,30 +170,31 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   const [isCapturing, setIsCapturing] = useState(false);
   const [showOptionsPanel, setShowOptionsPanel] = useState(false);
   const [showSearchPanel, setShowSearchPanel] = useState(false);
-  const [showNeteasePanel, setShowNeteasePanel] = useState(false);
+  const [showQqMusicPanel, setShowQqMusicPanel] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<NeteaseSong[]>([]);
+  const [searchResults, setSearchResults] = useState<QqMusicSong[]>([]);
   const [searchStatus, setSearchStatus] = useState('');
   const [isSearching, setIsSearching] = useState(false);
-  const [neteaseCloudTab, setNeteaseCloudTab] = useState<NeteaseCloudTab>('daily');
-  const [neteaseCloudSongs, setNeteaseCloudSongs] = useState<NeteaseSong[]>([]);
-  const [neteaseCloudPlaylists, setNeteaseCloudPlaylists] = useState<NeteasePlaylistSummary[]>([]);
-  const [activeNeteasePlaylistId, setActiveNeteasePlaylistId] = useState<number | null>(null);
-  const [neteaseCloudStatus, setNeteaseCloudStatus] = useState('');
-  const [isLoadingNeteaseCloud, setIsLoadingNeteaseCloud] = useState(false);
+  const [qqMusicCloudTab, setQqMusicCloudTab] = useState<QqMusicCloudTab>('daily');
+  const [qqMusicCloudSongs, setQqMusicCloudSongs] = useState<QqMusicSong[]>([]);
+  const [qqMusicCloudPlaylists, setQqMusicCloudPlaylists] = useState<QqMusicPlaylistSummary[]>([]);
+  const [activeQqMusicPlaylistId, setActiveQqMusicPlaylistId] = useState<string | null>(null);
+  const [qqMusicCloudStatus, setQqMusicCloudStatus] = useState('');
+  const [isLoadingQqMusicCloud, setIsLoadingQqMusicCloud] = useState(false);
   const [showPlaylistPanel, setShowPlaylistPanel] = useState(false);
+  const [playlistPanelSource, setPlaylistPanelSource] = useState<PlaylistPanelSource>('qq');
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>(readSavedPlaylists);
   const [activePlaylistId, setActivePlaylistId] = useState('favorites');
-  const [songToAdd, setSongToAdd] = useState<NeteaseSong | null>(null);
+  const [songToAdd, setSongToAdd] = useState<QqMusicSong | null>(null);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [playMode, setPlayMode] = useState<PlayMode>('sequence');
-  const [playQueue, setPlayQueue] = useState<NeteaseSong[]>([]);
-  const [currentSongId, setCurrentSongId] = useState<number | null>(null);
+  const [playQueue, setPlayQueue] = useState<QqMusicSong[]>([]);
+  const [currentSongId, setCurrentSongId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
-  const [neteaseCookie, setNeteaseCookie] = useState(readNeteaseCookieStorage);
+  const [qqMusicCookie, setQqMusicCookie] = useState(readQqMusicCookieStorage);
   const [cookieStatus, setCookieStatus] = useState('');
-  const [isNeteaseCookieValid, setIsNeteaseCookieValid] = useState(false);
-  const [isSyncingNeteaseCookie, setIsSyncingNeteaseCookie] = useState(false);
+  const [isQqMusicCookieValid, setIsQqMusicCookieValid] = useState(false);
+  const [isSyncingQqMusicCookie, setIsSyncingQqMusicCookie] = useState(false);
   const [isMobileSideNavOpen, setIsMobileSideNavOpen] = useState(false);
   const [hasSeenSideNavHint, setHasSeenSideNavHint] = useState(readSideNavHintSeen);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -205,14 +215,14 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   const closeFloatingPanels = () => {
     setShowOptionsPanel(false);
     setShowSearchPanel(false);
-    setShowNeteasePanel(false);
+    setShowQqMusicPanel(false);
     setShowPlaylistPanel(false);
     setIsMobileSideNavOpen(false);
   };
 
   const openOptionsPanel = () => {
     setShowSearchPanel(false);
-    setShowNeteasePanel(false);
+    setShowQqMusicPanel(false);
     setShowPlaylistPanel(false);
     setShowOptionsPanel(true);
     setIsMobileSideNavOpen(false);
@@ -220,26 +230,30 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
   const openSearchPanel = () => {
     setShowOptionsPanel(false);
-    setShowNeteasePanel(false);
+    setShowQqMusicPanel(false);
     setShowPlaylistPanel(false);
     setShowSearchPanel(true);
     setIsMobileSideNavOpen(false);
   };
 
-  const openNeteasePanel = () => {
+  const openQqMusicPanel = () => {
     setShowOptionsPanel(false);
     setShowSearchPanel(false);
     setShowPlaylistPanel(false);
-    setShowNeteasePanel(true);
+    setShowQqMusicPanel(true);
     setIsMobileSideNavOpen(false);
   };
 
   const openPlaylistPanel = () => {
     setShowOptionsPanel(false);
     setShowSearchPanel(false);
-    setShowNeteasePanel(false);
+    setShowQqMusicPanel(false);
+    setPlaylistPanelSource('qq');
     setShowPlaylistPanel(true);
     setIsMobileSideNavOpen(false);
+    if (qqMusicCloudPlaylists.length === 0 && !isLoadingQqMusicCloud) {
+      void loadQqMusicPlaylists();
+    }
   };
 
   useEffect(() => {
@@ -258,70 +272,92 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     });
   }, [playlists]);
 
-  const syncNeteaseCookie = async (cookie: string, options: { silent?: boolean } = {}) => {
-    const normalizedCookie = cookie.trim();
-    if (normalizedCookie && !options.silent) {
-      setCookieStatus('正在校验 Cookie...');
+  const getQqMusicCookieStatusText = (data: any, hasCookieInput: boolean) => {
+    if (!hasCookieInput) return 'Cookie cleared';
+    if (data?.valid) {
+      return data.uin && data.uin !== '0'
+        ? `Cookie verified for account ${data.uin}; QQ Music requests will use it`
+        : 'Cookie verified; QQ Music requests will use it';
     }
 
-    setIsSyncingNeteaseCookie(true);
+    switch (data?.reason) {
+      case 'missing-uin':
+        return 'Cookie is missing uin. Copy the full Cookie header from y.qq.com.';
+      case 'missing-login-token':
+        return 'Cookie is missing qqmusic_key, qm_keyst, p_skey, or skey. Log in again and copy the full Cookie.';
+      case 'login-check-failed':
+        return 'QQ Music rejected this Cookie. It may be expired or incomplete.';
+      case 'login-check-error':
+        return 'Cookie validation request failed. Try again later.';
+      default:
+        return 'Cookie saved, but validation failed';
+    }
+  };
+
+  const syncQqMusicCookie = async (cookie: string, options: { silent?: boolean } = {}) => {
+    const normalizedCookie = cookie.trim();
+    if (normalizedCookie && !options.silent) {
+      setCookieStatus('Validating Cookie...');
+    }
+
+    setIsSyncingQqMusicCookie(true);
     try {
-      const response = await fetch('/api/netease/cookie', {
+      const response = await fetch('/api/qqmusic/cookie', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cookie }),
       });
       const data = await response.json();
       const valid = Boolean(data.valid);
-      setIsNeteaseCookieValid(valid);
+      setIsQqMusicCookieValid(valid);
       if (!options.silent) {
-        setCookieStatus(normalizedCookie ? (valid ? 'Cookie 可用，已开启网易云' : 'Cookie 已保存，但校验失败') : 'Cookie 已清除');
+        setCookieStatus(getQqMusicCookieStatusText(data, Boolean(normalizedCookie)));
       }
       if (normalizedCookie && !valid) {
-        fetch('/api/netease/cookie', {
+        fetch('/api/qqmusic/cookie', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cookie: '' }),
         }).catch((error) => {
-          console.warn('Unable to clear invalid Netease proxy cookie:', error);
+          console.warn('Unable to clear invalid QqMusic proxy cookie:', error);
         });
       }
       return valid;
     } catch (error) {
-      console.warn('Unable to sync Netease cookie:', error);
+      console.warn('Unable to sync QqMusic cookie:', error);
       if (!options.silent) {
-        setIsNeteaseCookieValid(false);
+        setIsQqMusicCookieValid(false);
       }
       if (!options.silent) {
         setCookieStatus('已保存到浏览器，但同步到本地代理失败');
       }
-      return options.silent && isNeteaseCookieValid;
+      return options.silent && isQqMusicCookieValid;
     } finally {
-      setIsSyncingNeteaseCookie(false);
+      setIsSyncingQqMusicCookie(false);
     }
   };
 
   useEffect(() => {
-    const savedCookie = readNeteaseCookieStorage();
+    const savedCookie = readQqMusicCookieStorage();
     if (savedCookie) {
-      setNeteaseCookie(savedCookie);
-      syncNeteaseCookie(savedCookie);
+      setQqMusicCookie(savedCookie);
+      syncQqMusicCookie(savedCookie);
     }
   }, []);
 
 
-  const saveNeteaseCookie = () => {
-    writeNeteaseCookieStorage(neteaseCookie);
-    const normalizedCookie = readNeteaseCookieStorage();
-    setNeteaseCookie(normalizedCookie);
-    syncNeteaseCookie(normalizedCookie);
+  const saveQqMusicCookie = () => {
+    writeQqMusicCookieStorage(qqMusicCookie);
+    const normalizedCookie = readQqMusicCookieStorage();
+    setQqMusicCookie(normalizedCookie);
+    syncQqMusicCookie(normalizedCookie);
   };
 
-  const clearNeteaseCookie = () => {
-    writeNeteaseCookieStorage('');
-    setNeteaseCookie('');
-    setIsNeteaseCookieValid(false);
-    syncNeteaseCookie('');
+  const clearQqMusicCookie = () => {
+    writeQqMusicCookieStorage('');
+    setQqMusicCookie('');
+    setIsQqMusicCookieValid(false);
+    syncQqMusicCookie('');
   };
 
   const syncImportedPlaylists = (nextPlaylists: SavedPlaylist[]) => {
@@ -349,31 +385,31 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     setActivePlaylistId(data.playlists[0]?.id || 'favorites');
     syncImportedPlaylists(data.playlists);
 
-    const importedCookie = data.neteaseCookie || '';
-    setNeteaseCookie(importedCookie);
+    const importedCookie = data.qqMusicCookie || '';
+    setQqMusicCookie(importedCookie);
     if (importedCookie) {
-      await syncNeteaseCookie(importedCookie);
+      await syncQqMusicCookie(importedCookie);
     } else {
-      setIsNeteaseCookieValid(false);
-      await syncNeteaseCookie('', { silent: true });
+      setIsQqMusicCookieValid(false);
+      await syncQqMusicCookie('', { silent: true });
     }
 
     setPresetTransferStatus('预设已导入，当前页面已更新');
   };
 
-  const ensureNeteaseCookieReady = async () => {
-    const savedCookie = readNeteaseCookieStorage();
+  const ensureQqMusicCookieReady = async () => {
+    const savedCookie = readQqMusicCookieStorage();
     if (!savedCookie.trim()) {
-      setIsNeteaseCookieValid(false);
-      setNeteaseCloudStatus('请先在设置里保存可用的网易云 Cookie');
+      setIsQqMusicCookieValid(false);
+      setQqMusicCloudStatus('请先在设置里保存可用的QQ 音乐 Cookie');
       openOptionsPanel();
       return '';
     }
 
-    setNeteaseCookie(savedCookie);
-    const valid = await syncNeteaseCookie(savedCookie, { silent: isNeteaseCookieValid });
+    setQqMusicCookie(savedCookie);
+    const valid = await syncQqMusicCookie(savedCookie, { silent: isQqMusicCookieValid });
     if (!valid) {
-      setNeteaseCloudStatus('Cookie 需要重新保存');
+      setQqMusicCloudStatus('Cookie 需要重新保存');
       openOptionsPanel();
       return '';
     }
@@ -381,100 +417,100 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     return savedCookie;
   };
 
-  const fetchNeteaseSongs = async (url: string, emptyMessage: string) => {
-    const readyCookie = await ensureNeteaseCookieReady();
+  const fetchQqMusicSongs = async (url: string, emptyMessage: string) => {
+    const readyCookie = await ensureQqMusicCookieReady();
     if (!readyCookie) return;
 
-    setIsLoadingNeteaseCloud(true);
-    setNeteaseCloudStatus('正在加载...');
+    setIsLoadingQqMusicCloud(true);
+    setQqMusicCloudStatus('正在加载...');
 
     try {
       const response = await fetch(url, {
-        headers: createNeteaseCookieHeaders(readyCookie),
+        headers: createQqMusicCookieHeaders(readyCookie),
       });
       const data = await response.json();
 
       if (!response.ok) {
         if (response.status === 401) {
-          setIsNeteaseCookieValid(false);
-          setNeteaseCloudStatus('网易云 Cookie 失效了，请重新保存');
+          setIsQqMusicCookieValid(false);
+          setQqMusicCloudStatus('QQ 音乐 Cookie 失效了，请重新保存');
           openOptionsPanel();
         } else {
-          setNeteaseCloudStatus('网易云接口临时失败，请稍后再试');
+          setQqMusicCloudStatus('QQ 音乐接口临时失败，请稍后再试');
         }
         return;
       }
 
       const songs = Array.isArray(data.songs) ? data.songs : [];
       if (songs.length === 0) {
-        setNeteaseCloudSongs([]);
-        setNeteaseCloudStatus(emptyMessage);
+        setQqMusicCloudSongs([]);
+        setQqMusicCloudStatus(emptyMessage);
         return;
       }
 
-      setNeteaseCloudSongs(songs);
-      setNeteaseCloudStatus('');
+      setQqMusicCloudSongs(songs);
+      setQqMusicCloudStatus('');
     } catch (error) {
-      console.warn('Unable to load Netease cloud songs:', error);
-      setNeteaseCloudStatus('加载失败，请稍后再试');
+      console.warn('Unable to load QqMusic cloud songs:', error);
+      setQqMusicCloudStatus('加载失败，请稍后再试');
     } finally {
-      setIsLoadingNeteaseCloud(false);
+      setIsLoadingQqMusicCloud(false);
     }
   };
 
   const loadDailyRecommendations = async () => {
-    setNeteaseCloudTab('daily');
-    setActiveNeteasePlaylistId(null);
-    await fetchNeteaseSongs('/api/netease/daily-recommend?limit=50', '每日推荐里暂时没有可播放歌曲');
+    setQqMusicCloudTab('daily');
+    setActiveQqMusicPlaylistId(null);
+    await fetchQqMusicSongs('/api/qqmusic/daily-recommend?limit=50', '每日推荐里暂时没有可播放歌曲');
   };
 
   const loadLikedSongs = async () => {
-    setNeteaseCloudTab('liked');
-    setActiveNeteasePlaylistId(null);
-    await fetchNeteaseSongs('/api/netease/liked?limit=50', '喜欢列表里暂时没有可播放歌曲');
+    setQqMusicCloudTab('liked');
+    setActiveQqMusicPlaylistId(null);
+    await fetchQqMusicSongs('/api/qqmusic/liked?limit=50', '喜欢列表里暂时没有可播放歌曲');
   };
 
-  const loadNeteasePlaylists = async () => {
-    setNeteaseCloudTab('playlists');
-    setNeteaseCloudSongs([]);
-    setActiveNeteasePlaylistId(null);
-    const readyCookie = await ensureNeteaseCookieReady();
+  const loadQqMusicPlaylists = async () => {
+    setQqMusicCloudTab('playlists');
+    setQqMusicCloudSongs([]);
+    setActiveQqMusicPlaylistId(null);
+    const readyCookie = await ensureQqMusicCookieReady();
     if (!readyCookie) return;
 
-    setIsLoadingNeteaseCloud(true);
-    setNeteaseCloudStatus('正在加载歌单...');
+    setIsLoadingQqMusicCloud(true);
+    setQqMusicCloudStatus('正在加载歌单...');
 
     try {
-      const response = await fetch('/api/netease/playlists', {
-        headers: createNeteaseCookieHeaders(readyCookie),
+      const response = await fetch('/api/qqmusic/playlists', {
+        headers: createQqMusicCookieHeaders(readyCookie),
       });
       const data = await response.json();
 
       if (!response.ok) {
         if (response.status === 401) {
-          setIsNeteaseCookieValid(false);
-          setNeteaseCloudStatus('网易云 Cookie 失效了，请重新保存');
+          setIsQqMusicCookieValid(false);
+          setQqMusicCloudStatus('QQ 音乐 Cookie 失效了，请重新保存');
           openOptionsPanel();
         } else {
-          setNeteaseCloudStatus('网易云接口临时失败，请稍后再试');
+          setQqMusicCloudStatus('QQ 音乐接口临时失败，请稍后再试');
         }
         return;
       }
 
       const cloudPlaylists = Array.isArray(data.playlists) ? data.playlists : [];
-      setNeteaseCloudPlaylists(cloudPlaylists);
-      setNeteaseCloudStatus(cloudPlaylists.length ? '请选择一个歌单' : '没有找到网易云歌单');
+      setQqMusicCloudPlaylists(cloudPlaylists);
+      setQqMusicCloudStatus(cloudPlaylists.length ? '请选择一个歌单' : '没有找到QQ 音乐歌单');
     } catch (error) {
-      console.warn('Unable to load Netease playlists:', error);
-      setNeteaseCloudStatus('歌单加载失败，请稍后再试');
+      console.warn('Unable to load QqMusic playlists:', error);
+      setQqMusicCloudStatus('歌单加载失败，请稍后再试');
     } finally {
-      setIsLoadingNeteaseCloud(false);
+      setIsLoadingQqMusicCloud(false);
     }
   };
 
-  const loadNeteasePlaylistSongs = async (playlist: NeteasePlaylistSummary) => {
-    setActiveNeteasePlaylistId(playlist.id);
-    await fetchNeteaseSongs(`/api/netease/playlist?id=${playlist.id}&limit=50`, '这个歌单里暂时没有可播放歌曲');
+  const loadQqMusicPlaylistSongs = async (playlist: QqMusicPlaylistSummary) => {
+    setActiveQqMusicPlaylistId(playlist.id);
+    await fetchQqMusicSongs(`/api/qqmusic/playlist?id=${playlist.id}&limit=50`, '这个歌单里暂时没有可播放歌曲');
   };
 
   useEffect(() => {
@@ -635,21 +671,21 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     engine.togglePlay();
   };
 
-  const searchNetease = async () => {
+  const searchQqMusic = async () => {
     const keywords = searchQuery.trim();
     if (!keywords) return;
-    const requestCookie = isNeteaseCookieValid ? neteaseCookie : '';
+    const requestCookie = isQqMusicCookieValid ? qqMusicCookie : '';
 
     setIsSearching(true);
-    setSearchStatus('正在搜索可播放歌曲...');
+    setSearchStatus('正在搜索歌曲...');
     setSearchResults([]);
 
     try {
       const searchUrl = requestCookie
-        ? `/api/netease/search?keywords=${encodeURIComponent(keywords)}&limit=30`
-        : `/api/netease/search?keywords=${encodeURIComponent(keywords)}`;
+        ? `/api/qqmusic/search?keywords=${encodeURIComponent(keywords)}&limit=30`
+        : `/api/qqmusic/search?keywords=${encodeURIComponent(keywords)}`;
       const response = await fetch(searchUrl, {
-        headers: createNeteaseCookieHeaders(requestCookie),
+        headers: createQqMusicCookieHeaders(requestCookie),
       });
       if (!response.ok) throw new Error('Search request failed');
 
@@ -660,31 +696,35 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       setSearchStatus(songs.length ? '' : (rawCount > 0
         ? (requestCookie
           ? `搜到 ${rawCount} 首，但当前账号没有可播放版本，可能受版权、会员或地区限制。`
-          : `搜到 ${rawCount} 首，但未登录只能显示可播放歌曲；保存网易云 Cookie 后可能会显示更多。`)
+          : `搜到 ${rawCount} 首，但暂时没有拿到可显示结果。`)
         : '没有搜到歌曲，请换个关键词试试。'));
     } catch (error) {
-      console.warn('Netease search failed:', error);
+      console.warn('QqMusic search failed:', error);
       setSearchStatus('搜索失败，请稍后再试');
     } finally {
       setIsSearching(false);
     }
   };
 
-  const loadNeteaseSong = async (song: NeteaseSong, queue?: NeteaseSong[]) => {
+  const loadQqMusicSong = async (song: QqMusicSong, queue?: QqMusicSong[]) => {
     if (queue) setPlayQueue(queue);
     setCurrentSongId(song.id);
     setTrackName(`${song.artist ? `${song.artist} - ` : ''}${song.name}`);
     setLyricsText('');
     setSearchStatus('正在加载歌曲...');
-    const requestCookie = isNeteaseCookieValid ? neteaseCookie : '';
+    const requestCookie = isQqMusicCookieValid ? qqMusicCookie : '';
 
     try {
+      const songId = encodeURIComponent(song.id);
+      const playNonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const [urlResponse, lyricResponse] = await Promise.all([
-        fetch(`/api/netease/url?id=${song.id}`, {
-          headers: createNeteaseCookieHeaders(requestCookie),
+        fetch(`/api/qqmusic/url?id=${songId}&play=${playNonce}`, {
+          cache: 'no-store',
+          headers: createQqMusicCookieHeaders(requestCookie),
         }),
-        fetch(`/api/netease/lyric?id=${song.id}`, {
-          headers: createNeteaseCookieHeaders(requestCookie),
+        fetch(`/api/qqmusic/lyric?id=${songId}`, {
+          cache: 'no-store',
+          headers: createQqMusicCookieHeaders(requestCookie),
         }),
       ]);
 
@@ -695,26 +735,26 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
       if (!urlData.url) {
         setSearchStatus('这首歌可能需要 Cookie、会员或地区权限，正在尝试下一首...');
-        playFromQueue(1, song.id);
+        playFromQueue(1, song.id, queue);
         return;
       }
 
       engine.init();
-      engine.loadUrl(`/api/netease/audio?id=${song.id}`);
+      engine.loadUrl(`/api/qqmusic/audio?id=${songId}&play=${playNonce}`);
       engine.play();
       setSearchStatus('');
       setShowSearchPanel(false);
     } catch (error) {
-      console.warn('Unable to load Netease song:', error);
+      console.warn('Unable to load QqMusic song:', error);
       setSearchStatus('加载失败，正在尝试下一首...');
-      playFromQueue(1, song.id);
+      playFromQueue(1, song.id, queue);
     }
   };
 
   const getCurrentQueue = () => playQueue.length > 0 ? playQueue : activePlaylist?.songs || [];
 
-  const playFromQueue = (direction: 1 | -1, fromSongId = currentSongId) => {
-    const queue = getCurrentQueue();
+  const playFromQueue = (direction: 1 | -1, fromSongId = currentSongId, queueOverride?: QqMusicSong[]) => {
+    const queue = queueOverride?.length ? queueOverride : getCurrentQueue();
     if (queue.length === 0) return;
 
     let nextIndex = 0;
@@ -729,7 +769,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       nextIndex = (baseIndex + direction + queue.length) % queue.length;
     }
 
-    loadNeteaseSong(queue[nextIndex], queue);
+    loadQqMusicSong(queue[nextIndex], queue);
   };
 
   useEffect(() => {
@@ -742,19 +782,20 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     return () => engine.audioElement.removeEventListener('ended', handleEnded);
   }, [playQueue, currentSongId, playMode, activePlaylistId, playlists]);
 
-  const addSongToPlaylist = (playlistId: string, song: NeteaseSong) => {
+  const addSongToPlaylist = (playlistId: string, song: QqMusicSong) => {
     setPlaylists((current) => current.map((playlist) => {
       if (playlist.id !== playlistId) return playlist;
       const exists = playlist.songs.some((savedSong) => savedSong.id === song.id);
       if (exists) return playlist;
       return { ...playlist, songs: [...playlist.songs, song] };
     }));
-    const playlistName = playlists.find((playlist) => playlist.id === playlistId)?.name || 'playlist';
+    const targetPlaylist = playlists.find((playlist) => playlist.id === playlistId);
+    const playlistName = targetPlaylist ? getPlaylistDisplayName(targetPlaylist) : '歌单';
     setSearchStatus(`已加入 ${playlistName}`);
     setSongToAdd(null);
   };
 
-  const addSongToFavorites = (song: NeteaseSong) => {
+  const addSongToFavorites = (song: QqMusicSong) => {
     setPlaylists((current) => current.map((playlist) => {
       if (playlist.id !== 'favorites') return playlist;
       const exists = playlist.songs.some((savedSong) => savedSong.id === song.id);
@@ -762,7 +803,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       return { ...playlist, songs: [...playlist.songs, song] };
     }));
     setSearchStatus('已加入喜欢');
-    setNeteaseCloudStatus('已加入喜欢');
+    setQqMusicCloudStatus('已加入喜欢');
   };
 
   const createPlaylistAndAddSong = () => {
@@ -777,7 +818,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     setNewPlaylistName('');
   };
 
-  const deleteSongFromPlaylist = (playlistId: string, songId: number) => {
+  const deleteSongFromPlaylist = (playlistId: string, songId: string) => {
     setPlaylists((current) => current.map((playlist) => {
       if (playlist.id !== playlistId) return playlist;
       return { ...playlist, songs: playlist.songs.filter((song) => song.id !== songId) };
@@ -920,18 +961,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
           <button onClick={openSearchPanel} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
             搜索
           </button>
-          {isNeteaseCookieValid && (
-            <button
-              onClick={() => {
-                openNeteasePanel();
-                loadDailyRecommendations();
-              }}
-              className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2"
-              style={{ writingMode: 'vertical-rl' }}
-            >
-              网易云
-            </button>
-          )}
           <button onClick={openPlaylistPanel} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
             歌单
           </button>
@@ -1012,20 +1041,20 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
         <div className="absolute top-[40px] left-[100px] w-[360px] max-h-[70vh] z-50 pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.88)' }}>
           <div className="p-5 border-b border-white/10">
             <div className="flex items-center justify-between mb-4">
-              <div className="text-[12px] uppercase tracking-[0.2em] text-white/70">Netease Search</div>
-              <button onClick={() => setShowSearchPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+              <div className="text-[12px] uppercase tracking-[0.2em] text-white/70">QQ音乐搜索</div>
+              <button onClick={() => setShowSearchPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">关闭</button>
             </div>
             <form
               className="flex gap-2"
               onSubmit={(e) => {
                 e.preventDefault();
-                searchNetease();
+                searchQqMusic();
               }}
             >
               <input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Song or artist"
+                placeholder="歌曲或歌手"
                 className="min-w-0 flex-1 bg-white/5 border border-white/10 rounded-sm px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
               />
               <button
@@ -1034,7 +1063,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
                 className="px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-black rounded-sm disabled:opacity-50"
                 style={{ backgroundColor: accentHex }}
               >
-                Go
+                搜索
               </button>
             </form>
             {searchStatus && <div className="mt-3 text-[11px] text-white/45">{searchStatus}</div>}
@@ -1043,7 +1072,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
             {searchResults.map((song) => (
               <button
                 key={song.id}
-                onClick={() => loadNeteaseSong(song, searchResults)}
+                onClick={() => loadQqMusicSong(song, searchResults)}
                 className="relative w-full text-left px-5 py-4 pr-16 border-b border-white/5 hover:bg-white/5 transition-colors"
               >
                 <div className={`text-[13px] truncate ${currentSongId === song.id ? 'text-white' : 'text-white/80'}`}>{song.name}</div>
@@ -1062,11 +1091,11 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
                     }
                   }}
                   className="absolute right-5 top-1/2 -translate-y-1/2 h-8 w-8 rounded-sm border border-white/10 text-white/55 hover:text-black hover:border-transparent transition-colors flex items-center justify-center"
-                  title="Add to playlist"
+                  title="添加到歌单"
                 >
                   <Plus size={15} />
                 </span>
-                <div className="mt-1 text-[11px] text-white/45 truncate">{song.artist || 'Unknown artist'} - {song.album || 'Unknown album'}</div>
+                <div className="mt-1 text-[11px] text-white/45 truncate">{song.artist || '未知歌手'} - {song.album || '未知专辑'}</div>
               </button>
             ))}
           </div>
@@ -1078,10 +1107,10 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
           <div className="p-5 border-b border-white/10">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-[10px] uppercase tracking-[0.18em] text-white/45 mb-2">Add To Playlist</div>
+                <div className="text-[10px] uppercase tracking-[0.18em] text-white/45 mb-2">添加到歌单</div>
                 <div className="text-[13px] text-white truncate" title={songToAdd.name}>{songToAdd.name}</div>
               </div>
-              <button onClick={() => setSongToAdd(null)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+              <button onClick={() => setSongToAdd(null)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">关闭</button>
             </div>
           </div>
           <div className="p-3 border-b border-white/10">
@@ -1091,7 +1120,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
                 onClick={() => addSongToPlaylist(playlist.id, songToAdd)}
                 className="w-full flex items-center justify-between gap-3 px-3 py-3 text-left hover:bg-white/5 rounded-sm transition-colors"
               >
-                <span className="min-w-0 text-[12px] text-white truncate">{playlist.name}</span>
+                <span className="min-w-0 text-[12px] text-white truncate">{getPlaylistDisplayName(playlist)}</span>
                 <span className="text-[10px] text-white/35">{playlist.songs.length}</span>
               </button>
             ))}
@@ -1106,7 +1135,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
             <input
               value={newPlaylistName}
               onChange={(e) => setNewPlaylistName(e.target.value)}
-              placeholder="New playlist"
+              placeholder="新建歌单"
               className="min-w-0 flex-1 bg-white/5 border border-white/10 rounded-sm px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
             />
             <button
@@ -1114,7 +1143,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
               className="h-9 w-9 flex-shrink-0 rounded-sm text-black flex items-center justify-center disabled:opacity-50"
               style={{ backgroundColor: accentHex }}
               disabled={!newPlaylistName.trim()}
-              title="Create playlist"
+              title="创建歌单"
             >
               <Plus size={15} />
             </button>
@@ -1123,156 +1152,176 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       )}
 
       {showPlaylistPanel && (
-        <div className="absolute top-[40px] left-[100px] w-[420px] max-h-[74vh] z-[65] pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.9)' }}>
+        <div className="absolute top-[40px] left-[100px] w-[520px] max-h-[78vh] z-[65] pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.9)' }}>
           <div className="p-5 border-b border-white/10">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.2em] text-white/70">
                 <ListMusic size={15} />
-                Playlists
+                歌单
               </div>
-              <button onClick={() => setShowPlaylistPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+              <button onClick={() => setShowPlaylistPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">关闭</button>
             </div>
-            <div className="flex items-center gap-3">
-              <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1">
-              {playlists.map((playlist) => (
+            <div className="flex gap-2 mb-4">
+              {(['qq', 'local'] as PlaylistPanelSource[]).map((source) => (
                 <button
-                  key={playlist.id}
-                  onClick={() => setActivePlaylistId(playlist.id)}
-                  className={`flex-shrink-0 px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${activePlaylist?.id === playlist.id ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
-                  style={{ backgroundColor: activePlaylist?.id === playlist.id ? accentHex : 'transparent' }}
-                >
-                  {playlist.name}
-                </button>
-              ))}
-              </div>
-              <button
-                onClick={() => activePlaylist && setPendingDelete({ type: 'playlist', playlistId: activePlaylist.id, label: activePlaylist.name })}
-                disabled={!activePlaylist || playlists.length <= 1}
-                className="h-8 w-8 flex-shrink-0 rounded-sm border border-white/10 text-white/45 hover:text-[#ef4444] disabled:opacity-20 disabled:hover:text-white/45 flex items-center justify-center"
-                title="Delete playlist"
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-          </div>
-          <div className="max-h-[52vh] overflow-y-auto">
-            {activePlaylist && activePlaylist.songs.length > 0 ? activePlaylist.songs.map((song) => (
-              <button
-                key={song.id}
-                onClick={() => loadNeteaseSong(song, activePlaylist.songs)}
-                className="relative w-full text-left px-5 py-4 pr-16 border-b border-white/5 hover:bg-white/5 transition-colors"
-              >
-                <div className="text-[13px] text-white truncate">{song.name}</div>
-                <div className="mt-1 text-[11px] text-white/45 truncate">{song.artist || 'Unknown artist'} - {song.album || 'Unknown album'}</div>
-                <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setPendingDelete({ type: 'song', playlistId: activePlaylist.id, songId: song.id, label: song.name });
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setPendingDelete({ type: 'song', playlistId: activePlaylist.id, songId: song.id, label: song.name });
+                  key={source}
+                  onClick={() => {
+                    setPlaylistPanelSource(source);
+                    if (source === 'qq' && qqMusicCloudPlaylists.length === 0 && !isLoadingQqMusicCloud) {
+                      void loadQqMusicPlaylists();
                     }
                   }}
-                  className="absolute right-5 top-1/2 -translate-y-1/2 h-8 w-8 rounded-sm border border-white/10 text-white/45 hover:text-[#ef4444] transition-colors flex items-center justify-center"
-                  title="Remove from playlist"
+                  className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.14em] transition-colors ${playlistPanelSource === source ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
+                  style={{ backgroundColor: playlistPanelSource === source ? accentHex : 'transparent' }}
+                >
+                  {source === 'qq' ? 'QQ音乐' : '本地'}
+                </button>
+              ))}
+            </div>
+
+            {playlistPanelSource === 'qq' ? (
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={loadQqMusicPlaylists}
+                  className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${qqMusicCloudTab === 'playlists' ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
+                  style={{ backgroundColor: qqMusicCloudTab === 'playlists' ? accentHex : 'transparent' }}
+                >
+                  歌单
+                </button>
+                <button
+                  onClick={loadLikedSongs}
+                  className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${qqMusicCloudTab === 'liked' ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
+                  style={{ backgroundColor: qqMusicCloudTab === 'liked' ? accentHex : 'transparent' }}
+                >
+                  喜欢
+                </button>
+                <button
+                  onClick={loadDailyRecommendations}
+                  className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${qqMusicCloudTab === 'daily' ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
+                  style={{ backgroundColor: qqMusicCloudTab === 'daily' ? accentHex : 'transparent' }}
+                >
+                  每日推荐
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1">
+                  {playlists.map((playlist) => (
+                    <button
+                      key={playlist.id}
+                      onClick={() => setActivePlaylistId(playlist.id)}
+                      className={`flex-shrink-0 px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${activePlaylist?.id === playlist.id ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
+                      style={{ backgroundColor: activePlaylist?.id === playlist.id ? accentHex : 'transparent' }}
+                    >
+                      {getPlaylistDisplayName(playlist)}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => activePlaylist && setPendingDelete({ type: 'playlist', playlistId: activePlaylist.id, label: getPlaylistDisplayName(activePlaylist) })}
+                  disabled={!activePlaylist || playlists.length <= 1}
+                  className="h-8 w-8 flex-shrink-0 rounded-sm border border-white/10 text-white/45 hover:text-[#ef4444] disabled:opacity-20 disabled:hover:text-white/45 flex items-center justify-center"
+                  title="删除歌单"
                 >
                   <Trash2 size={14} />
-                </span>
-              </button>
-            )) : (
-              <div className="px-5 py-8 text-[12px] text-white/40">No songs in this playlist yet</div>
+                </button>
+              </div>
             )}
           </div>
-        </div>
-      )}
 
-      {showNeteasePanel && (
-        <div className="absolute top-[40px] left-[100px] w-[460px] max-h-[76vh] z-[66] pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.92)' }}>
-          <div className="p-5 border-b border-white/10">
-            <div className="flex items-center justify-between mb-4">
-              <div className="text-[12px] uppercase tracking-[0.2em] text-white/70">网易云</div>
-              <button onClick={() => setShowNeteasePanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">关闭</button>
+          {playlistPanelSource === 'qq' ? (
+            <div className="max-h-[58vh] overflow-y-auto">
+              {qqMusicCloudStatus && <div className="px-5 py-3 border-b border-white/5 text-[11px] text-white/45">{qqMusicCloudStatus}</div>}
+              {isLoadingQqMusicCloud && <div className="px-5 py-8 text-[12px] text-white/40">正在加载QQ音乐...</div>}
+              {!isLoadingQqMusicCloud && qqMusicCloudTab === 'playlists' && qqMusicCloudPlaylists.length > 0 && (
+                <div className="border-b border-white/10">
+                  {qqMusicCloudPlaylists.map((playlist) => (
+                    <button
+                      key={playlist.id}
+                      onClick={() => loadQqMusicPlaylistSongs(playlist)}
+                      className={`w-full flex items-center justify-between gap-4 px-5 py-4 text-left border-b border-white/5 hover:bg-white/5 transition-colors ${activeQqMusicPlaylistId === playlist.id ? 'bg-white/[0.04]' : ''}`}
+                    >
+                      <div className="min-w-0">
+                        <div className="text-[13px] text-white/85 truncate">{getPlaylistDisplayName(playlist)}</div>
+                        <div className="mt-1 text-[11px] text-white/35">{playlist.trackCount ?? playlist.count ?? 0} 首歌</div>
+                      </div>
+                      <div className="text-[10px] uppercase tracking-[0.15em] text-white/35">打开</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {!isLoadingQqMusicCloud && (qqMusicCloudTab !== 'playlists' || activeQqMusicPlaylistId || qqMusicCloudSongs.length > 0) && (
+                <QqMusicSongList
+                  songs={qqMusicCloudSongs}
+                  currentSongId={currentSongId}
+                  queue={qqMusicCloudSongs}
+                  onPlay={loadQqMusicSong}
+                  onFavorite={addSongToFavorites}
+                  emptyText={qqMusicCloudTab === 'playlists' ? '请先选择上方的QQ音乐歌单' : '暂未加载歌曲'}
+                />
+              )}
+              {!isLoadingQqMusicCloud && qqMusicCloudTab === 'playlists' && qqMusicCloudPlaylists.length === 0 && !qqMusicCloudStatus && (
+                <div className="px-5 py-8 text-[12px] text-white/40">暂未加载QQ音乐歌单</div>
+              )}
             </div>
-            <div className="flex gap-2">
-              <button
-                onClick={loadLikedSongs}
-                className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${neteaseCloudTab === 'liked' ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
-                style={{ backgroundColor: neteaseCloudTab === 'liked' ? accentHex : 'transparent' }}
-              >
-                喜欢
-              </button>
-              <button
-                onClick={loadNeteasePlaylists}
-                className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${neteaseCloudTab === 'playlists' ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
-                style={{ backgroundColor: neteaseCloudTab === 'playlists' ? accentHex : 'transparent' }}
-              >
-                歌单
-              </button>
-              <button
-                onClick={loadDailyRecommendations}
-                className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${neteaseCloudTab === 'daily' ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
-                style={{ backgroundColor: neteaseCloudTab === 'daily' ? accentHex : 'transparent' }}
-              >
-                每日推荐
-              </button>
-            </div>
-          </div>
-
-          {neteaseCloudTab === 'playlists' && (
-            <div className="p-3 border-b border-white/10 max-h-[140px] overflow-y-auto">
-              {neteaseCloudPlaylists.length > 0 ? neteaseCloudPlaylists.map((playlist) => (
+          ) : (
+            <div className="max-h-[52vh] overflow-y-auto">
+              {activePlaylist && activePlaylist.songs.length > 0 ? activePlaylist.songs.map((song) => (
                 <button
-                  key={playlist.id}
-                  onClick={() => loadNeteasePlaylistSongs(playlist)}
-                  className={`w-full flex items-center justify-between gap-3 px-3 py-3 text-left hover:bg-white/5 rounded-sm transition-colors ${activeNeteasePlaylistId === playlist.id ? 'bg-white/5' : ''}`}
+                  key={song.id}
+                  onClick={() => loadQqMusicSong(song, activePlaylist.songs)}
+                  className="relative w-full text-left px-5 py-4 pr-16 border-b border-white/5 hover:bg-white/5 transition-colors"
                 >
-                  <span className="min-w-0 text-[12px] text-white truncate">{playlist.name}</span>
-                  <span className="text-[10px] text-white/35">{playlist.trackCount}</span>
+                  <div className="text-[13px] text-white truncate">{song.name}</div>
+                  <div className="mt-1 text-[11px] text-white/45 truncate">{song.artist || '未知歌手'} - {song.album || '未知专辑'}</div>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPendingDelete({ type: 'song', playlistId: activePlaylist.id, songId: song.id, label: song.name });
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setPendingDelete({ type: 'song', playlistId: activePlaylist.id, songId: song.id, label: song.name });
+                      }
+                    }}
+                    className="absolute right-5 top-1/2 -translate-y-1/2 h-8 w-8 rounded-sm border border-white/10 text-white/45 hover:text-[#ef4444] transition-colors flex items-center justify-center"
+                    title="从歌单移除"
+                  >
+                    <Trash2 size={14} />
+                  </span>
                 </button>
               )) : (
-                <div className="px-3 py-4 text-[12px] text-white/40">{isLoadingNeteaseCloud ? '正在加载歌单...' : '点击“歌单”加载你的网易云歌单'}</div>
+                <div className="px-5 py-8 text-[12px] text-white/40">这个歌单还没有歌曲</div>
               )}
             </div>
           )}
-
-          {neteaseCloudStatus && <div className="px-5 py-3 border-b border-white/5 text-[11px] text-white/45">{neteaseCloudStatus}</div>}
-          <NeteaseSongList
-            songs={neteaseCloudSongs}
-            currentSongId={currentSongId}
-            queue={neteaseCloudSongs}
-            onPlay={loadNeteaseSong}
-            onFavorite={addSongToFavorites}
-            emptyText={isLoadingNeteaseCloud ? '正在加载...' : '这里会显示可播放歌曲'}
-          />
         </div>
       )}
-
       {pendingDelete && (
         <div className="absolute inset-0 z-[120] pointer-events-auto flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="w-[320px] border border-white/10 rounded-sm p-5" style={{ background: 'rgba(5,10,15,0.96)' }}>
             <div className="text-[12px] uppercase tracking-[0.2em] text-white/70 mb-3">
-              Confirm Delete
+              确认删除
             </div>
             <div className="text-[13px] text-white/80 leading-relaxed mb-5">
-              Delete {pendingDelete.type === 'playlist' ? 'playlist' : 'song'} <span className="text-white">{pendingDelete.label}</span>?
+              确定删除{pendingDelete.type === 'playlist' ? '歌单' : '歌曲'} <span className="text-white">{pendingDelete.label}</span> 吗？
             </div>
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setPendingDelete(null)}
                 className="px-3 py-2 rounded-sm border border-white/10 text-[10px] uppercase tracking-[0.15em] text-white/45 hover:text-white"
               >
-                Cancel
+                取消
               </button>
               <button
                 onClick={confirmPendingDelete}
                 className="px-3 py-2 rounded-sm border border-[#ef4444]/40 text-[10px] uppercase tracking-[0.15em] text-[#ef4444] hover:bg-[#ef4444] hover:text-black"
               >
-                Delete
+                删除
               </button>
             </div>
           </div>
@@ -1301,7 +1350,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
             </button>
           </div>
           <div className="player-panel-meta text-[11px] leading-4 opacity-50 uppercase mb-3 tracking-wider">
-             {isCapturing ? 'System Audio Capture' : 'Local Audio'}
+             {isCapturing ? '系统音频采集' : '本地音频'}
              <span className="ml-2 text-[#3b82f6] text-[10px]">&bull; {resolvedTheme.name}</span>
           </div>
 
@@ -1405,7 +1454,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
                 title="Upload .lrc file"
              >
                 <div className="w-1.5 h-1.5 rounded-full bg-red-500/50"></div>
-                No Lyrics - Click to upload .lrc
+                无歌词 - 点击上传 .lrc
              </div>
           )}
           <div className="mobile-hide-aux-ui">
@@ -1415,20 +1464,20 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       )}
 
       <div className="mobile-hide-aux-ui absolute bottom-[40px] right-[40px] text-[10px] uppercase tracking-[0.1em] opacity-30 select-none">
-        Drag to orbit - Click to pulse
+        拖拽旋转 - 点击触发脉冲
       </div>
       {/* Options Panel */}
       {showOptionsPanel && (
         <OptionsPanel
           onClose={() => setShowOptionsPanel(false)}
           accentHex={accentHex}
-          neteaseCookie={neteaseCookie}
-          setNeteaseCookie={setNeteaseCookie}
-          onSaveCookie={saveNeteaseCookie}
-          onClearCookie={clearNeteaseCookie}
+          qqMusicCookie={qqMusicCookie}
+          setQqMusicCookie={setQqMusicCookie}
+          onSaveCookie={saveQqMusicCookie}
+          onClearCookie={clearQqMusicCookie}
           cookieStatus={cookieStatus}
-          isNeteaseCookieValid={isNeteaseCookieValid}
-          isSyncingNeteaseCookie={isSyncingNeteaseCookie}
+          isQqMusicCookieValid={isQqMusicCookieValid}
+          isSyncingQqMusicCookie={isSyncingQqMusicCookie}
           theme={theme}
           customThemes={customThemes}
           activeCustomThemeId={activeCustomThemeId}
@@ -1449,7 +1498,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
 import { TriggerPreset } from '../../lib/AudioEngine';
 
-function NeteaseSongList({
+function QqMusicSongList({
   songs,
   currentSongId,
   queue,
@@ -1457,11 +1506,11 @@ function NeteaseSongList({
   onFavorite,
   emptyText,
 }: {
-  songs: NeteaseSong[];
-  currentSongId: number | null;
-  queue: NeteaseSong[];
-  onPlay: (song: NeteaseSong, queue?: NeteaseSong[]) => void;
-  onFavorite: (song: NeteaseSong) => void;
+  songs: QqMusicSong[];
+  currentSongId: string | null;
+  queue: QqMusicSong[];
+  onPlay: (song: QqMusicSong, queue?: QqMusicSong[]) => void;
+  onFavorite: (song: QqMusicSong) => void;
   emptyText: string;
 }) {
   return (
@@ -1504,13 +1553,13 @@ function NeteaseSongList({
 function OptionsPanel({
   onClose,
   accentHex,
-  neteaseCookie,
-  setNeteaseCookie,
+  qqMusicCookie,
+  setQqMusicCookie,
   onSaveCookie,
   onClearCookie,
   cookieStatus,
-  isNeteaseCookieValid,
-  isSyncingNeteaseCookie,
+  isQqMusicCookieValid,
+  isSyncingQqMusicCookie,
   theme,
   customThemes,
   activeCustomThemeId,
@@ -1526,13 +1575,13 @@ function OptionsPanel({
 }: {
   onClose: () => void;
   accentHex: string;
-  neteaseCookie: string;
-  setNeteaseCookie: (cookie: string) => void;
+  qqMusicCookie: string;
+  setQqMusicCookie: (cookie: string) => void;
   onSaveCookie: () => void;
   onClearCookie: () => void;
   cookieStatus: string;
-  isNeteaseCookieValid: boolean;
-  isSyncingNeteaseCookie: boolean;
+  isQqMusicCookieValid: boolean;
+  isSyncingQqMusicCookie: boolean;
   theme: string;
   customThemes: CustomThemeSettings[];
   activeCustomThemeId: string;
@@ -1555,12 +1604,12 @@ function OptionsPanel({
     Meteor: '流星特效',
     GroundEq: '地面 EQ',
     Color: '自定义主题',
-    Cookie: '网易云 Cookie',
+    Cookie: 'QQ 音乐 Cookie',
   };
 
   const exportPreset = () => {
     try {
-      const presetPackage = createPresetTransferPackage({ includeNeteaseCookie: includeCookieInExport });
+      const presetPackage = createPresetTransferPackage({ includeQqMusicCookie: includeCookieInExport });
       const blob = new Blob([JSON.stringify(presetPackage, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -1571,7 +1620,7 @@ function OptionsPanel({
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-      setPresetTransferStatus(includeCookieInExport ? '预设已导出，包含网易云 Cookie' : '预设已导出，未包含网易云 Cookie');
+      setPresetTransferStatus(includeCookieInExport ? '预设已导出，包含QQ 音乐 Cookie' : '预设已导出，未包含QQ 音乐 Cookie');
     } catch (error) {
       console.warn('Unable to export presets:', error);
       setPresetTransferStatus('导出失败，请稍后重试');
@@ -1606,7 +1655,7 @@ function OptionsPanel({
           <div className="flex justify-between items-center mb-6">
              <div>
                <div className="text-xl font-light tracking-widest text-white">设置</div>
-               <div className="mt-2 text-[10px] uppercase tracking-[0.18em] text-white/35">视觉触发器、颜色与网易云 Cookie</div>
+               <div className="mt-2 text-[10px] uppercase tracking-[0.18em] text-white/35">视觉触发器、颜色与QQ 音乐 Cookie</div>
              </div>
              <button onClick={onClose} className="text-white/50 hover:text-white uppercase tracking-widest text-[10px]">关闭</button>
           </div>
@@ -1688,15 +1737,15 @@ function OptionsPanel({
               onThemeRotationChange={onThemeRotationChange}
             />
           ) : activeTab === 'Cookie' ? (
-            <NeteaseCookiePanel
+            <QqMusicCookiePanel
               accentHex={accentHex}
-              neteaseCookie={neteaseCookie}
-              setNeteaseCookie={setNeteaseCookie}
+              qqMusicCookie={qqMusicCookie}
+              setQqMusicCookie={setQqMusicCookie}
               onSaveCookie={onSaveCookie}
               onClearCookie={onClearCookie}
               cookieStatus={cookieStatus}
-              isNeteaseCookieValid={isNeteaseCookieValid}
-              isSyncingNeteaseCookie={isSyncingNeteaseCookie}
+              isQqMusicCookieValid={isQqMusicCookieValid}
+              isSyncingQqMusicCookie={isSyncingQqMusicCookie}
             />
           ) : (
             <FreqTriggerPanel key={activeTab} action={activeTab} accentHex={accentHex} />
@@ -2300,24 +2349,24 @@ function CustomColorPanel({
   );
 }
 
-function NeteaseCookiePanel({
+function QqMusicCookiePanel({
   accentHex,
-  neteaseCookie,
-  setNeteaseCookie,
+  qqMusicCookie,
+  setQqMusicCookie,
   onSaveCookie,
   onClearCookie,
   cookieStatus,
-  isNeteaseCookieValid,
-  isSyncingNeteaseCookie,
+  isQqMusicCookieValid,
+  isSyncingQqMusicCookie,
 }: {
   accentHex: string;
-  neteaseCookie: string;
-  setNeteaseCookie: (cookie: string) => void;
+  qqMusicCookie: string;
+  setQqMusicCookie: (cookie: string) => void;
   onSaveCookie: () => void;
   onClearCookie: () => void;
   cookieStatus: string;
-  isNeteaseCookieValid: boolean;
-  isSyncingNeteaseCookie: boolean;
+  isQqMusicCookieValid: boolean;
+  isSyncingQqMusicCookie: boolean;
 }) {
   return (
     <div className="grid gap-5">
@@ -2326,11 +2375,11 @@ function NeteaseCookiePanel({
           <div>
             <div className="text-[12px] uppercase tracking-[0.18em] text-white/70 mb-2">手动 Cookie 登录</div>
             <div className="text-[11px] leading-relaxed text-white/45">
-              先在网易云官网正常登录，再从浏览器复制 Cookie。本项目不会自动读取官网 Cookie。
+              先在QQ 音乐官网正常登录，再从浏览器复制 Cookie。本项目不会自动读取官网 Cookie。
             </div>
           </div>
           <button
-            onClick={() => window.open('https://music.163.com/', '_blank', 'noopener,noreferrer')}
+            onClick={() => window.open('https://y.qq.com/', '_blank', 'noopener,noreferrer')}
             className="shrink-0 px-3 py-2 rounded-sm text-[10px] uppercase tracking-[0.15em] text-black"
             style={{ backgroundColor: accentHex }}
           >
@@ -2338,10 +2387,10 @@ function NeteaseCookiePanel({
           </button>
         </div>
         <ol className="grid gap-2 text-[12px] leading-relaxed text-white/55 list-decimal list-inside">
-          <li>用电脑 Chrome 或 Edge 打开 music.163.com，先登录网易云账号。</li>
+          <li>用电脑 Chrome 或 Edge 打开 y.qq.com，先登录QQ 音乐账号。</li>
           <li>按 F12 打开开发者工具；如果没有反应，试试 Fn + F12 或 Ctrl + Shift + I。</li>
-          <li>点顶部的 Network/网络，刷新网易云页面或播放、搜索一首歌。</li>
-          <li>在过滤输入框里搜 weapi；搜不到就改搜 music.163.com。</li>
+          <li>点顶部的 Network/网络，刷新QQ 音乐页面或播放、搜索一首歌。</li>
+          <li>在过滤输入框里搜 fcg 或 musicu；搜不到就改搜 y.qq.com。</li>
           <li>点任意请求，在 Headers/标头里搜索 cookie。</li>
           <li>复制 Cookie: 后面的整段内容，粘贴到下面输入框，点保存 Cookie。</li>
         </ol>
@@ -2350,21 +2399,21 @@ function NeteaseCookiePanel({
         </div>
       </div>
       <div className="grid gap-2">
-        <label className="text-[10px] uppercase tracking-[0.18em] text-white/45">网易云 Cookie</label>
+        <label className="text-[10px] uppercase tracking-[0.18em] text-white/45">QQ 音乐 Cookie</label>
         <textarea
-          value={neteaseCookie}
-          onChange={(e) => setNeteaseCookie(e.target.value)}
+          value={qqMusicCookie}
+          onChange={(e) => setQqMusicCookie(e.target.value)}
           spellCheck={false}
-          placeholder="MUSIC_U=...; __csrf=...; NMTID=..."
+          placeholder="Paste the Cookie value copied from y.qq.com"
           className="min-h-[180px] resize-y bg-black/40 border border-white/10 rounded-sm px-3 py-3 text-[12px] leading-relaxed text-white outline-none focus:border-white/30 font-mono"
         />
       </div>
       <div className="text-[11px] leading-relaxed text-white/45">
-        可以直接粘贴多行 Cookie，保存时会自动整理成网易云接口能用的格式。
+        可以直接粘贴多行 Cookie，保存时会自动整理成 QQ 音乐接口能用的格式。
       </div>
       <div className="flex items-center justify-between gap-3">
         <div className="text-[11px] text-white/45">
-          {isSyncingNeteaseCookie ? '正在校验 Cookie...' : (cookieStatus || (neteaseCookie.trim() ? (isNeteaseCookieValid ? 'Cookie 可用，网易云入口已开启' : '已从浏览器读取 Cookie，请点击保存进行校验') : '当前没有保存 Cookie'))}
+          {isSyncingQqMusicCookie ? '正在校验 Cookie...' : (cookieStatus || (qqMusicCookie.trim() ? (isQqMusicCookieValid ? 'Cookie 已保存，可用于 QQ 音乐请求' : '已从浏览器读取 Cookie，请点击保存进行校验') : '当前没有保存 Cookie'))}
         </div>
         <div className="flex gap-2">
           <button
@@ -2695,7 +2744,3 @@ function StatBox({ label, value, accentHex }: { label: string, value: number, ac
     </div>
   );
 }
-
-
-
-

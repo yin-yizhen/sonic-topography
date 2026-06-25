@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import {
   PRESET_TRANSFER_VERSION,
   createPresetTransferPackage,
@@ -6,7 +6,7 @@ import {
   normalizeTransferPlaylists,
   writePresetTransferPackage,
 } from './presetTransfer';
-import { NETEASE_COOKIE_STORAGE_KEY } from './neteaseCookie';
+import { QQ_MUSIC_COOKIE_STORAGE_KEY } from './qqMusicCookie';
 
 const storage = new Map<string, string>();
 (globalThis as any).window = {
@@ -18,18 +18,18 @@ const storage = new Map<string, string>();
 };
 
 storage.clear();
-storage.set(NETEASE_COOKIE_STORAGE_KEY, 'MUSIC_U=abc;\nNMTID=def;');
+storage.set(QQ_MUSIC_COOKIE_STORAGE_KEY, 'sample_cookie=placeholder;\n sample_uin=0;');
 let preset = createPresetTransferPackage();
-assert.equal(preset.data.neteaseCookie, undefined);
+assert.equal(preset.data.qqMusicCookie, undefined);
 
-preset = createPresetTransferPackage({ includeNeteaseCookie: true });
-assert.equal(preset.data.neteaseCookie, 'MUSIC_U=abc; NMTID=def');
+preset = createPresetTransferPackage({ includeQqMusicCookie: true });
+assert.equal(preset.data.qqMusicCookie, 'sample_cookie=placeholder; sample_uin=0');
 
 assert.throws(() => normalizePresetTransferPackage({ app: 'sonic-topography', version: 999, data: {} }), /Sonic Topography/);
 
 const playlists = normalizeTransferPlaylists([{ id: 'custom', name: 'Custom', songs: [{ id: '123', name: 'Song' }] }]);
 assert.equal(playlists[0].id, 'favorites');
-assert.equal(playlists[1].songs[0].id, 123);
+assert.equal(playlists[1].songs[0].id, '123');
 
 const imported = writePresetTransferPackage({
   app: 'sonic-topography',
@@ -46,7 +46,7 @@ const imported = writePresetTransferPackage({
     activeCustomThemeId: 'custom-a',
     activeThemeId: 'custom',
     themeRotation: { enabled: true, intervalSeconds: 1, themeIds: ['custom-a'] },
-    neteaseCookie: 'MUSIC_U=xyz;',
+    qqMusicCookie: 'sample_cookie=placeholder;',
   },
 });
 
@@ -56,6 +56,6 @@ assert.deepEqual(imported.data.groundEqSettings.curve.slice(0, 3), [100, 0, 50])
 assert.equal(imported.data.customThemes[0].glowIntensity, 2.2);
 assert.equal(imported.data.customThemes[0].rotationSpeed, 2);
 assert.equal(imported.data.customThemes[0].showPlayerPanel, false);
-assert.equal(storage.get(NETEASE_COOKIE_STORAGE_KEY), 'MUSIC_U=xyz');
+assert.equal(storage.get(QQ_MUSIC_COOKIE_STORAGE_KEY), 'sample_cookie=placeholder');
 
 console.log('presetTransfer tests passed');

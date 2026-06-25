@@ -2,23 +2,40 @@
 import react from '@vitejs/plugin-react';
 import fs from 'node:fs/promises';
 import path from 'path';
-import {defineConfig} from 'vite';
-import { NETEASE_COOKIE_HEADER, normalizeNeteaseCookie } from './src/lib/neteaseCookie';
+import { defineConfig } from 'vite';
+import { QQ_MUSIC_COOKIE_HEADER, normalizeQqMusicCookie } from './src/lib/qqMusicCookie';
 
-const neteaseHeaders = {
-  Referer: 'https://music.163.com/',
+const qqMusicHeaders = {
+  Referer: 'https://y.qq.com/',
+  Origin: 'https://y.qq.com',
   'User-Agent': 'Mozilla/5.0',
   Accept: 'application/json, text/plain, */*',
   Connection: 'close',
 };
 
 const playableUrlCache = new Map<string, { url: string | null; expiresAt: number }>();
-const searchCache = new Map<string, { payload: { songs: any[]; rawCount: number; filteredCount: number }; expiresAt: number }>();
+const searchCache = new Map<string, { payload: { songs: QqMusicSong[]; rawCount: number; filteredCount: number }; expiresAt: number }>();
 const playableUrlCacheTtl = 1000 * 60 * 10;
 const searchCacheTtl = 1000 * 60 * 5;
 const dataDir = path.resolve(__dirname, 'data');
 const playlistsPath = path.join(dataDir, 'playlists.json');
-let browserNeteaseCookie = '';
+let browserQqMusicCookie = '';
+
+interface QqMusicSong {
+  id: string;
+  name: string;
+  artist: string;
+  album: string;
+  duration: number;
+  fee: number;
+}
+
+interface QqMusicPlaylistSummary {
+  id: string;
+  name: string;
+  count: number;
+  cover: string;
+}
 
 function writeJson(res: any, status: number, data: unknown) {
   res.statusCode = status;
@@ -77,154 +94,216 @@ async function fetchJsonWithRetry(url: string | URL, options: RequestInit = {}, 
   let lastData: any = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const response = await fetch(url, options);
-    const data = await response.json() as any;
-    lastData = data;
-    if (response.ok && data?.code !== 400) return data;
+    const text = await response.text();
+    lastData = parseJsonLike(text);
+    if (response.ok && lastData?.code !== 400) return lastData;
     if (attempt < retries) await wait(180 * (attempt + 1));
   }
   return lastData || {};
 }
 
-async function getNeteasePlayableUrlWithCookie(id: string, cookie: string) {
-  const normalizedCookie = normalizeNeteaseCookie(cookie);
-  const cacheKey = `${id}::${normalizedCookie}`;
-  const cached = playableUrlCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return cached.url;
-
-  const url = `https://music.163.com/api/song/enhance/player/url?id=${encodeURIComponent(id)}&ids=%5B${encodeURIComponent(id)}%5D&br=320000`;
-  const data = await fetchJsonWithRetry(url, { headers: createNeteaseHeaders(normalizedCookie) });
-  const playableUrl = data?.data?.[0]?.url || null;
-  playableUrlCache.set(cacheKey, { url: playableUrl, expiresAt: Date.now() + playableUrlCacheTtl });
-  return playableUrl;
-}
-
-function mapNeteaseSong(song: any) {
-  const artists = song.artists || song.ar || [];
-  const album = song.album || song.al || {};
-  return {
-    id: song.id,
-    name: song.name,
-    artist: artists.map((artist: any) => artist.name).filter(Boolean).join(' / '),
-    album: album?.name || '',
-    duration: song.duration || song.dt || 0,
-    fee: song.fee,
-  };
-}
-
-async function fetchNeteaseSearchSongs(keywords: string, resultLimit: number, cookie: string) {
-  const upstreamLimit = Math.min(resultLimit * 5, 80);
-  const body = new URLSearchParams({
-    s: keywords,
-    type: '1',
-    offset: '0',
-    total: 'true',
-    limit: String(upstreamLimit),
-    _: String(Date.now()),
-  });
-
-  const data = await fetchJsonWithRetry('https://music.163.com/api/search/get/web', {
-    method: 'POST',
-    headers: createNeteaseHeaders(cookie, {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    }),
-    body,
-  });
-  const primarySongs = data?.result?.songs || [];
-
-  const fallbackUrl = new URL('https://music.163.com/api/cloudsearch/pc');
-  fallbackUrl.searchParams.set('s', keywords);
-  fallbackUrl.searchParams.set('type', '1');
-  fallbackUrl.searchParams.set('offset', '0');
-  fallbackUrl.searchParams.set('total', 'true');
-  fallbackUrl.searchParams.set('limit', String(upstreamLimit));
-  fallbackUrl.searchParams.set('_', String(Date.now()));
-  const fallbackData = await fetchJsonWithRetry(fallbackUrl, {
-    headers: createNeteaseHeaders(cookie),
-  });
-  const fallbackSongs = fallbackData?.result?.songs || [];
-  const songsById = new Map();
-  for (const song of [...primarySongs, ...fallbackSongs]) {
-    if (song?.id && !songsById.has(song.id)) songsById.set(song.id, song);
+function parseJsonLike(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  try {
+    return JSON.parse(trimmed);
+  } catch (error) {
+    const jsonp = trimmed.match(/^[\w$.]+\((.*)\);?$/s);
+    if (jsonp) return JSON.parse(jsonp[1]);
+    throw error;
   }
-  return {
-    songs: [...songsById.values()],
-    debug: {
-      primaryCode: data?.code,
-      primaryCount: primarySongs.length,
-      fallbackCode: fallbackData?.code,
-      fallbackCount: fallbackSongs.length,
-    },
-  };
 }
 
-async function fetchAnonymousNeteaseSearchSongs(keywords: string, resultLimit: number) {
-  const body = new URLSearchParams({
-    s: keywords,
-    type: '1',
-    offset: '0',
-    total: 'true',
-    limit: String(Math.min(resultLimit * 3, 60)),
-  });
-
-  const response = await fetch('https://music.163.com/api/search/get/web', {
-    method: 'POST',
-    headers: {
-      ...neteaseHeaders,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body,
-  });
-  const data = await response.json() as any;
-  return data?.result?.songs || [];
-}
-
-function readNeteaseCookie(req: any) {
-  const raw = req.headers?.[NETEASE_COOKIE_HEADER.toLowerCase()];
+function readQqMusicCookie(req: any) {
+  const raw = req.headers?.[QQ_MUSIC_COOKIE_HEADER.toLowerCase()];
   const headerCookie = Array.isArray(raw) ? raw[0] : String(raw || '');
-  return normalizeNeteaseCookie(headerCookie || browserNeteaseCookie);
+  return normalizeQqMusicCookie(headerCookie || browserQqMusicCookie);
 }
 
-function createNeteaseHeaders(cookie: string, extraHeaders: Record<string, string> = {}) {
-  const normalizedCookie = normalizeNeteaseCookie(cookie);
+function createQqMusicHeaders(cookie: string, extraHeaders: Record<string, string> = {}) {
+  const normalizedCookie = normalizeQqMusicCookie(cookie);
   return {
-    ...neteaseHeaders,
+    ...qqMusicHeaders,
     ...(normalizedCookie ? { Cookie: normalizedCookie } : {}),
     ...extraHeaders,
   };
 }
 
-
-async function validateNeteaseCookie(cookie: string) {
-  const account = await getNeteaseAccount(cookie);
-  return account.valid;
+function pickQqSip(value: unknown) {
+  const sip = Array.isArray(value) ? value.find((item) => typeof item === 'string' && item.startsWith('http')) : '';
+  return sip || 'https://isure.stream.qqmusic.qq.com/';
 }
 
-async function getNeteaseAccount(cookie: string) {
-  const normalizedCookie = normalizeNeteaseCookie(cookie);
-  if (!normalizedCookie) return { valid: false, userId: null, nickname: '' };
-
-  const response = await fetch('https://music.163.com/api/nuser/account/get', {
-    headers: createNeteaseHeaders(normalizedCookie),
+function parseQqMusicCookie(cookie: string) {
+  const entries = new Map<string, string>();
+  String(cookie || '').split(';').forEach((part) => {
+    const index = part.indexOf('=');
+    if (index <= 0) return;
+    const key = part.slice(0, index).trim().toLowerCase();
+    const value = part.slice(index + 1).trim();
+    if (key) entries.set(key, value);
   });
-  const data = await response.json() as any;
-  const userId = data?.profile?.userId || data?.account?.id || null;
+  return entries;
+}
+
+function normalizeQqUin(value: unknown) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits || '0';
+}
+
+function extractUinFromCookie(cookie: string) {
+  const entries = parseQqMusicCookie(cookie);
+  return normalizeQqUin(entries.get('uin') || entries.get('qqmusic_uin') || entries.get('o_cookie') || entries.get('luin'));
+}
+
+function calculateQqGTK(seed: string) {
+  let hash = 5381;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash += (hash << 5) + seed.charCodeAt(i);
+  }
+  return String(hash & 0x7fffffff);
+}
+
+function getQqMusicAuth(cookie: string) {
+  const normalizedCookie = normalizeQqMusicCookie(cookie);
+  const entries = parseQqMusicCookie(normalizedCookie);
+  const uin = extractUinFromCookie(normalizedCookie);
+  const gtkSeed = entries.get('p_skey') || entries.get('skey') || '';
+  const hasAuthToken = ['qqmusic_key', 'qm_keyst', 'music_key', 'p_skey', 'skey'].some((key) => Boolean(entries.get(key)));
   return {
-    valid: Boolean(userId),
-    userId,
-    nickname: data?.profile?.nickname || '',
+    cookie: normalizedCookie,
+    uin,
+    gtk: gtkSeed ? calculateQqGTK(gtkSeed) : '5381',
+    hasAuthToken,
+    hasLoginIdentity: normalizedCookie !== '' && uin !== '0' && hasAuthToken,
   };
 }
 
+async function validateQqMusicCookie(cookie: string) {
+  const auth = getQqMusicAuth(cookie);
+  if (!auth.cookie) {
+    return { hasCookie: false, valid: false, uin: '0', reason: 'empty-cookie' };
+  }
+  if (auth.uin === '0') {
+    return { hasCookie: true, valid: false, uin: '0', reason: 'missing-uin' };
+  }
+  if (!auth.hasAuthToken) {
+    return { hasCookie: true, valid: false, uin: auth.uin, reason: 'missing-login-token' };
+  }
 
-async function filterPlayableSongs(rawSongs: any[], resultLimit: number, cookie: string) {
-  const playableSongs: any[] = [];
-  const batchSize = 8;
+  const data = {
+    comm: { uin: auth.uin, format: 'json', ct: '19', cv: '1859' },
+    req: {
+      module: 'music.UserInfo.userInfoServer',
+      method: 'GetLoginUserInfo',
+      param: {},
+    },
+  };
+  const url = new URL('https://u.y.qq.com/cgi-bin/musicu.fcg');
+  url.searchParams.set('data', JSON.stringify(data));
+
+  try {
+    const response = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(auth.cookie) }, 1);
+    const code = Number(response?.req?.code ?? response?.code ?? -1);
+    return {
+      hasCookie: true,
+      valid: code === 0,
+      uin: auth.uin,
+      reason: code === 0 ? 'ok' : 'login-check-failed',
+      upstreamCode: code,
+    };
+  } catch (error) {
+    return { hasCookie: true, valid: false, uin: auth.uin, reason: 'login-check-error' };
+  }
+}
+
+async function getQqMusicPlayableUrl(id: string, cookie: string) {
+  const auth = getQqMusicAuth(cookie);
+  const normalizedCookie = auth.cookie;
+  const uin = auth.uin;
+  const cacheKey = `${id}::${normalizedCookie}`;
+  const cached = playableUrlCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.url;
+
+  const data = {
+    req_0: {
+      module: 'vkey.GetVkeyServer',
+      method: 'CgiGetVkey',
+      param: {
+        guid: String(Math.floor(1000000000 + Math.random() * 9000000000)),
+        songmid: [id],
+        songtype: [0],
+        uin,
+        loginflag: 1,
+        platform: '20',
+      },
+    },
+    comm: { uin, format: 'json', ct: '19', cv: '1859' },
+  };
+  const url = new URL('https://u.y.qq.com/cgi-bin/musicu.fcg');
+  url.searchParams.set('data', JSON.stringify(data));
+
+  const response = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(normalizedCookie) });
+  const vkeyData = response?.req_0?.data || {};
+  const info = vkeyData?.midurlinfo?.[0] || {};
+  const purl = String(info?.purl || '');
+  const playableUrl = purl ? (purl.startsWith('http') ? purl : `${pickQqSip(vkeyData.sip)}${purl}`) : null;
+  playableUrlCache.set(cacheKey, { url: playableUrl, expiresAt: Date.now() + playableUrlCacheTtl });
+  return playableUrl;
+}
+
+function mapQqMusicSong(song: any): QqMusicSong | null {
+  const id = String(song?.mid || song?.songmid || song?.songMid || song?.file?.media_mid || '').trim();
+  const name = String(song?.title || song?.name || song?.songname || '').trim();
+  if (!id || !name) return null;
+
+  const singers = song?.singer || song?.singers || [];
+  const artist = Array.isArray(singers)
+    ? singers.map((artist: any) => artist?.name).filter(Boolean).join(' / ')
+    : '';
+  const album = song?.album || {};
+  const durationSeconds = Number(song?.interval || song?.duration || 0);
+  const pay = song?.pay || {};
+
+  return {
+    id,
+    name,
+    artist,
+    album: String(album?.name || album?.title || song?.albumname || ''),
+    duration: Number.isFinite(durationSeconds) ? durationSeconds * 1000 : 0,
+    fee: (pay?.pay_play || pay?.payplay) ? 1 : 0,
+  };
+}
+
+async function fetchQqMusicSearchSongs(keywords: string, resultLimit: number, cookie: string) {
+  const data = {
+    comm: { ct: '19', cv: '1859', uin: getQqMusicAuth(cookie).uin, format: 'json' },
+    req: {
+      method: 'DoSearchForQQMusicDesktop',
+      module: 'music.search.SearchCgiService',
+      param: {
+        num_per_page: Math.min(resultLimit * 2, 60),
+        page_num: 1,
+        query: keywords,
+        search_type: 0,
+      },
+    },
+  };
+  const url = new URL('https://u.y.qq.com/cgi-bin/musicu.fcg');
+  url.searchParams.set('data', JSON.stringify(data));
+
+  const response = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(cookie) });
+  return response?.req?.data?.body?.song?.list || [];
+}
+async function filterPlayableSongs(rawSongs: QqMusicSong[], resultLimit: number, cookie: string) {
+  const playableSongs: QqMusicSong[] = [];
+  const batchSize = 6;
 
   for (let i = 0; i < rawSongs.length && playableSongs.length < resultLimit; i += batchSize) {
     const batch = rawSongs.slice(i, i + batchSize);
     const results = await Promise.all(batch.map(async (song) => ({
       song,
-      playableUrl: await getNeteasePlayableUrlWithCookie(String(song.id), cookie),
+      playableUrl: await getQqMusicPlayableUrl(song.id, cookie),
     })));
 
     for (const result of results) {
@@ -236,51 +315,220 @@ async function filterPlayableSongs(rawSongs: any[], resultLimit: number, cookie:
   return playableSongs;
 }
 
-async function getDailyRecommendSongs(cookie: string, resultLimit: number) {
-  const normalizedCookie = normalizeNeteaseCookie(cookie);
-  if (!normalizedCookie) return { valid: false, songs: [] };
-  const validCookie = await validateNeteaseCookie(normalizedCookie);
-  if (!validCookie) return { valid: false, songs: [] };
-
-  const response = await fetch('https://music.163.com/api/v3/discovery/recommend/songs', {
-    headers: createNeteaseHeaders(normalizedCookie),
-  });
-  const data = await response.json() as any;
-  const rawSongs = (data?.data?.dailySongs || data?.recommend || []).map(mapNeteaseSong);
-  const songs = await filterPlayableSongs(rawSongs, resultLimit, normalizedCookie);
-  return { valid: Boolean(data?.data?.dailySongs || data?.recommend), songs };
+function decodeMaybeBase64(value: unknown) {
+  const text = String(value || '');
+  if (!text) return '';
+  if (text.includes('[')) return text;
+  try {
+    return Buffer.from(text, 'base64').toString('utf8');
+  } catch (error) {
+    return text;
+  }
 }
 
-async function getUserPlaylists(cookie: string) {
-  const account = await getNeteaseAccount(cookie);
-  if (!account.valid || !account.userId) return { valid: false, playlists: [] };
-
-  const response = await fetch(`https://music.163.com/api/user/playlist?uid=${encodeURIComponent(account.userId)}&limit=100&offset=0`, {
-    headers: createNeteaseHeaders(cookie),
-  });
-  const data = await response.json() as any;
-  const playlists = (data?.playlist || []).map((playlist: any) => ({
-    id: playlist.id,
-    name: playlist.name,
-    trackCount: playlist.trackCount || 0,
-  }));
-
-  return { valid: true, playlists };
+function clampQqLimit(value: unknown, fallback = 50) {
+  const parsed = Number(value || fallback);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 100)) : fallback;
 }
 
-async function getPlaylistPlayableSongs(playlistId: string, cookie: string, resultLimit: number) {
-  const response = await fetch(`https://music.163.com/api/v6/playlist/detail?id=${encodeURIComponent(playlistId)}&n=${resultLimit * 2}`, {
-    headers: createNeteaseHeaders(cookie),
-  });
-  const data = await response.json() as any;
-  const tracks = data?.playlist?.tracks || [];
-  const songs = await filterPlayableSongs(tracks.map(mapNeteaseSong), resultLimit, cookie);
-  return songs;
+async function ensureQqMusicLogin(cookie: string) {
+  const result = await validateQqMusicCookie(cookie);
+  if (!result.valid) {
+    const error = new Error('QQ Music cookie is not valid');
+    (error as any).status = 401;
+    (error as any).payload = { error: 'QQ Music cookie is not valid', ...result };
+    throw error;
+  }
+  return getQqMusicAuth(cookie);
 }
 
-function neteaseApiPlugin() {
+function mapQqMusicPlaylist(playlist: any): QqMusicPlaylistSummary | null {
+  const id = String(playlist?.disstid || playlist?.tid || playlist?.dissid || playlist?.id || playlist?.dirid || '').trim();
+  const name = String(playlist?.dissname || playlist?.diss_name || playlist?.title || playlist?.name || playlist?.dirname || '').trim();
+  if (!id || !name) return null;
   return {
-    name: 'netease-api-proxy',
+    id,
+    name,
+    count: Number(playlist?.song_cnt || playlist?.songnum || playlist?.total_song_num || playlist?.song_count || playlist?.count || 0),
+    cover: String(playlist?.logo || playlist?.diss_cover || playlist?.cover || playlist?.picurl || playlist?.dir_pic_url2 || ''),
+  };
+}
+
+function uniquePlaylists(playlists: QqMusicPlaylistSummary[]) {
+  const seen = new Set();
+  return playlists.filter((playlist) => {
+    if (!playlist || seen.has(playlist.id)) return false;
+    seen.add(playlist.id);
+    return true;
+  });
+}
+
+async function fetchQqMusicCreatedPlaylists(cookie: string, limit: number) {
+  const auth = getQqMusicAuth(cookie);
+  const url = new URL('https://c.y.qq.com/rsc/fcgi-bin/fcg_user_created_diss');
+  url.searchParams.set('hostuin', auth.uin);
+  url.searchParams.set('sin', '0');
+  url.searchParams.set('size', String(limit));
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('g_tk', auth.gtk);
+  url.searchParams.set('loginUin', auth.uin);
+  url.searchParams.set('hostUin', auth.uin);
+  url.searchParams.set('platform', 'yqq.json');
+  url.searchParams.set('needNewCode', '0');
+  const data = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(cookie) });
+  const list = data?.data?.disslist || data?.disslist || data?.data?.list || [];
+  return Array.isArray(list) ? list.map(mapQqMusicPlaylist).filter(Boolean) : [];
+}
+
+async function fetchQqMusicFavoritePlaylists(cookie: string, limit: number) {
+  const auth = getQqMusicAuth(cookie);
+  const url = new URL('https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg');
+  url.searchParams.set('ct', '20');
+  url.searchParams.set('cid', '205360956');
+  url.searchParams.set('userid', auth.uin);
+  url.searchParams.set('reqtype', '3');
+  url.searchParams.set('sin', '0');
+  url.searchParams.set('ein', String(Math.max(0, limit - 1)));
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('g_tk', auth.gtk);
+  url.searchParams.set('loginUin', auth.uin);
+  url.searchParams.set('hostUin', auth.uin);
+  url.searchParams.set('platform', 'yqq.json');
+  url.searchParams.set('needNewCode', '0');
+  const data = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(cookie) });
+  const list = data?.data?.cdlist || data?.data?.list || data?.data?.v_list || data?.cdlist || data?.list || [];
+  return Array.isArray(list) ? list.map(mapQqMusicPlaylist).filter(Boolean) : [];
+}
+
+async function fetchQqMusicPlaylists(cookie: string, limit: number) {
+  await ensureQqMusicLogin(cookie);
+  const [created, favorites] = await Promise.all([
+    fetchQqMusicCreatedPlaylists(cookie, limit),
+    fetchQqMusicFavoritePlaylists(cookie, limit),
+  ]);
+  return uniquePlaylists([...created, ...favorites]).slice(0, limit);
+}
+
+async function fetchQqMusicPlaylistSongs(id: string, cookie: string, limit: number) {
+  const auth = getQqMusicAuth(cookie);
+  const url = new URL('https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg');
+  url.searchParams.set('type', '1');
+  url.searchParams.set('json', '1');
+  url.searchParams.set('utf8', '1');
+  url.searchParams.set('onlysong', '0');
+  url.searchParams.set('disstid', id);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('g_tk', auth.gtk);
+  url.searchParams.set('loginUin', auth.uin);
+  url.searchParams.set('hostUin', auth.uin);
+  url.searchParams.set('platform', 'yqq.json');
+  url.searchParams.set('needNewCode', '0');
+  const data = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(cookie) });
+  const cd = Array.isArray(data?.cdlist) ? data.cdlist[0] : null;
+  const list = Array.isArray(cd?.songlist) ? cd.songlist : [];
+  return list.map(mapQqMusicSong).filter(Boolean).slice(0, limit);
+}
+
+async function fetchQqMusicFavoriteSongs(cookie: string, limit: number) {
+  const auth = getQqMusicAuth(cookie);
+  const collected = [];
+  for (const reqtype of ['0', '1', '2']) {
+    const url = new URL('https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg');
+    url.searchParams.set('ct', '20');
+    url.searchParams.set('cid', '205360956');
+    url.searchParams.set('userid', auth.uin);
+    url.searchParams.set('reqtype', reqtype);
+    url.searchParams.set('sin', '0');
+    url.searchParams.set('ein', String(Math.max(0, limit - 1)));
+    url.searchParams.set('format', 'json');
+    url.searchParams.set('g_tk', auth.gtk);
+    url.searchParams.set('loginUin', auth.uin);
+    url.searchParams.set('hostUin', auth.uin);
+    url.searchParams.set('platform', 'yqq.json');
+    url.searchParams.set('needNewCode', '0');
+    const data = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(cookie) });
+    const list = data?.data?.list || data?.data?.songlist || data?.list || [];
+    if (Array.isArray(list)) {
+      collected.push(...list.map((item) => item?.song || item?.musicData || item).map(mapQqMusicSong).filter(Boolean));
+    }
+    if (collected.length > 0) break;
+  }
+  return collected.slice(0, limit);
+}
+
+async function fetchQqMusicLikedSongs(cookie: string, limit: number) {
+  await ensureQqMusicLogin(cookie);
+  const directSongs = await fetchQqMusicFavoriteSongs(cookie, limit);
+  if (directSongs.length > 0) return directSongs;
+
+  const playlists = await fetchQqMusicPlaylists(cookie, 100);
+  const likedPlaylist = playlists.find((playlist) => ['\u6211\u559c\u6b22', '\u559c\u6b61', 'liked', 'favorite', 'love'].some((token) => playlist.name.toLowerCase().includes(token.toLowerCase())));
+  return likedPlaylist ? fetchQqMusicPlaylistSongs(likedPlaylist.id, cookie, limit) : [];
+}
+
+function collectRecommendPlaylistIds(value: any, output: string[] = []) {
+  if (!value) return output;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectRecommendPlaylistIds(item, output));
+    return output;
+  }
+  if (typeof value !== 'object') return output;
+  const id = String(value.id || value.disstid || '').trim();
+  const jumpType = Number(value.jumptype || 0);
+  const type = Number(value.type || 0);
+  if (id && (jumpType === 10014 || type === 500) && !output.includes(id)) output.push(id);
+  Object.values(value).forEach((item) => collectRecommendPlaylistIds(item, output));
+  return output;
+}
+
+async function fetchQqMusicDailyRecommendations(cookie: string, limit: number) {
+  await ensureQqMusicLogin(cookie);
+  const auth = getQqMusicAuth(cookie);
+  const data = {
+    comm: { ct: '19', cv: '1859', uin: auth.uin, format: 'json' },
+    req: {
+      module: 'music.recommend.RecommendFeed',
+      method: 'get_recommend_feed',
+      param: { page: 1, direction: 0, last_id: '0' },
+    },
+  };
+  const url = new URL('https://u.y.qq.com/cgi-bin/musicu.fcg');
+  url.searchParams.set('data', JSON.stringify(data));
+  const response = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(cookie) });
+  const playlistIds = collectRecommendPlaylistIds(response?.req?.data).slice(0, 8);
+  for (const playlistId of playlistIds) {
+    const songs = await fetchQqMusicPlaylistSongs(playlistId, cookie, limit);
+    if (songs.length > 0) return songs;
+  }
+  return [];
+}
+
+async function getQqMusicLyric(id: string, cookie: string) {
+  const url = new URL('https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg');
+  url.searchParams.set('songmid', id);
+  url.searchParams.set('pcachetime', String(Date.now()));
+  const auth = getQqMusicAuth(cookie);
+  url.searchParams.set('g_tk', auth.gtk);
+  url.searchParams.set('loginUin', auth.uin);
+  url.searchParams.set('hostUin', auth.uin);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('inCharset', 'utf8');
+  url.searchParams.set('outCharset', 'utf-8');
+  url.searchParams.set('notice', '0');
+  url.searchParams.set('platform', 'yqq.json');
+  url.searchParams.set('needNewCode', '0');
+  url.searchParams.set('nobase64', '1');
+
+  const data = await fetchJsonWithRetry(url, { headers: createQqMusicHeaders(cookie) });
+  return {
+    lyric: decodeMaybeBase64(data?.lyric),
+    translatedLyric: decodeMaybeBase64(data?.trans),
+  };
+}
+
+function qqMusicApiPlugin() {
+  return {
+    name: 'qqmusic-api-proxy',
     configureServer(server: any) {
       server.middlewares.use('/api/playlists', async (req: any, res: any, next: any) => {
         try {
@@ -304,16 +552,91 @@ function neteaseApiPlugin() {
         next();
       });
 
-      server.middlewares.use('/api/netease/search', async (req: any, res: any) => {
+      server.middlewares.use('/api/qqmusic/cookie', async (req: any, res: any, next: any) => {
+        try {
+          if (req.method === 'GET') {
+            writeJson(res, 200, await validateQqMusicCookie(browserQqMusicCookie));
+            return;
+          }
+
+          if (req.method === 'PUT') {
+            const body = await readRequestBody(req);
+            const parsed = body ? JSON.parse(body) : {};
+            browserQqMusicCookie = normalizeQqMusicCookie(parsed.cookie);
+            playableUrlCache.clear();
+            searchCache.clear();
+            writeJson(res, 200, await validateQqMusicCookie(browserQqMusicCookie));
+            return;
+          }
+        } catch (error) {
+          writeJson(res, 500, { error: 'Unable to save QQ Music cookie' });
+          return;
+        }
+
+        next();
+      });
+
+      const writeQqMusicError = (res: any, error: any, fallbackMessage: string) => {
+        writeJson(res, Number(error?.status || 500), error?.payload || { error: fallbackMessage });
+      };
+
+      server.middlewares.use('/api/qqmusic/daily-recommend', async (req: any, res: any) => {
+        try {
+          const requestUrl = new URL(req.url || '', 'http://localhost');
+          const cookie = readQqMusicCookie(req);
+          const limit = clampQqLimit(requestUrl.searchParams.get('limit'), 50);
+          writeJson(res, 200, { songs: await fetchQqMusicDailyRecommendations(cookie, limit) });
+        } catch (error) {
+          writeQqMusicError(res, error, 'QQ Music daily recommendations failed');
+        }
+      });
+
+      server.middlewares.use('/api/qqmusic/liked', async (req: any, res: any) => {
+        try {
+          const requestUrl = new URL(req.url || '', 'http://localhost');
+          const cookie = readQqMusicCookie(req);
+          const limit = clampQqLimit(requestUrl.searchParams.get('limit'), 50);
+          writeJson(res, 200, { songs: await fetchQqMusicLikedSongs(cookie, limit) });
+        } catch (error) {
+          writeQqMusicError(res, error, 'QQ Music liked songs failed');
+        }
+      });
+
+      server.middlewares.use('/api/qqmusic/playlists', async (req: any, res: any) => {
+        try {
+          const requestUrl = new URL(req.url || '', 'http://localhost');
+          const cookie = readQqMusicCookie(req);
+          const limit = clampQqLimit(requestUrl.searchParams.get('limit'), 80);
+          writeJson(res, 200, { playlists: await fetchQqMusicPlaylists(cookie, limit) });
+        } catch (error) {
+          writeQqMusicError(res, error, 'QQ Music playlists failed');
+        }
+      });
+
+      server.middlewares.use('/api/qqmusic/playlist', async (req: any, res: any) => {
+        try {
+          const requestUrl = new URL(req.url || '', 'http://localhost');
+          const id = requestUrl.searchParams.get('id')?.trim();
+          if (!id) {
+            writeJson(res, 400, { error: 'Missing id' });
+            return;
+          }
+          const cookie = readQqMusicCookie(req);
+          await ensureQqMusicLogin(cookie);
+          const limit = clampQqLimit(requestUrl.searchParams.get('limit'), 50);
+          writeJson(res, 200, { songs: await fetchQqMusicPlaylistSongs(id, cookie, limit) });
+        } catch (error) {
+          writeQqMusicError(res, error, 'QQ Music playlist songs failed');
+        }
+      });
+
+      server.middlewares.use('/api/qqmusic/search', async (req: any, res: any) => {
         try {
           const requestUrl = new URL(req.url || '', 'http://localhost');
           const keywords = requestUrl.searchParams.get('keywords')?.trim();
           const requestedLimit = Number(requestUrl.searchParams.get('limit') || '30');
-          const cookie = readNeteaseCookie(req);
-          const hasCookie = Boolean(normalizeNeteaseCookie(cookie));
-          const resultLimit = hasCookie
-            ? (Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 40)) : 30)
-            : (Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 20)) : 12);
+          const resultLimit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 40)) : 30;
+          const cookie = readQqMusicCookie(req);
           const includeDebug = requestUrl.searchParams.get('debug') === '1';
 
           if (!keywords) {
@@ -321,202 +644,83 @@ function neteaseApiPlugin() {
             return;
           }
 
-          const searchMode = hasCookie ? `cookie::${normalizeNeteaseCookie(cookie)}` : 'anonymous-baseline';
-          const cacheKey = `${keywords.toLowerCase()}::${resultLimit}::${searchMode}`;
+          const cacheKey = `${keywords.toLowerCase()}::${resultLimit}::${normalizeQqMusicCookie(cookie)}`;
           const cached = searchCache.get(cacheKey);
           if (cached && cached.expiresAt > Date.now()) {
             writeJson(res, 200, { ...cached.payload, cached: true });
             return;
           }
 
-          const searchResult = hasCookie
-            ? await fetchNeteaseSearchSongs(keywords, resultLimit, cookie)
-            : { songs: await fetchAnonymousNeteaseSearchSongs(keywords, resultLimit), debug: { mode: 'anonymous-github' } };
-          const rawSongs = searchResult.songs.map(mapNeteaseSong);
-          const songs = await filterPlayableSongs(rawSongs, resultLimit, cookie);
+          const raw = await fetchQqMusicSearchSongs(keywords, resultLimit, cookie);
+          const rawSongs = raw.map(mapQqMusicSong).filter(Boolean) as QqMusicSong[];
+          const songs = rawSongs.slice(0, resultLimit);
           const payload = { songs, rawCount: rawSongs.length, filteredCount: songs.length };
           if (rawSongs.length > 0 || songs.length > 0) {
             searchCache.set(cacheKey, { payload, expiresAt: Date.now() + searchCacheTtl });
           }
 
-          writeJson(res, 200, includeDebug ? { ...payload, debug: searchResult.debug } : payload);
+          writeJson(res, 200, includeDebug ? { ...payload, debug: { rawCount: rawSongs.length } } : payload);
         } catch (error) {
-          writeJson(res, 500, { error: 'Netease search failed' });
+          writeJson(res, 500, { error: 'QQ Music search failed' });
         }
       });
 
-      server.middlewares.use('/api/netease/cookie', async (req: any, res: any, next: any) => {
-        try {
-          if (req.method === 'GET') {
-            const account = await getNeteaseAccount(browserNeteaseCookie);
-            writeJson(res, 200, {
-              hasCookie: Boolean(browserNeteaseCookie),
-              valid: account.valid,
-              userId: account.userId,
-              nickname: account.nickname,
-            });
-            return;
-          }
-
-          if (req.method === 'PUT') {
-            const body = await readRequestBody(req);
-            const parsed = body ? JSON.parse(body) : {};
-            browserNeteaseCookie = normalizeNeteaseCookie(parsed.cookie);
-            playableUrlCache.clear();
-            searchCache.clear();
-            const account = await getNeteaseAccount(browserNeteaseCookie);
-            writeJson(res, 200, { hasCookie: Boolean(browserNeteaseCookie), valid: account.valid, userId: account.userId, nickname: account.nickname });
-            return;
-          }
-        } catch (error) {
-          writeJson(res, 500, { error: 'Unable to check or save Netease cookie' });
-          return;
-        }
-
-        next();
-      });
-
-      server.middlewares.use('/api/netease/liked', async (req: any, res: any) => {
-        try {
-          const requestUrl = new URL(req.url || '', 'http://localhost');
-          const requestedLimit = Number(requestUrl.searchParams.get('limit') || '50');
-          const resultLimit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 80)) : 50;
-          const cookie = readNeteaseCookie(req);
-          const userPlaylists = await getUserPlaylists(cookie);
-
-          if (!userPlaylists.valid || userPlaylists.playlists.length === 0) {
-            writeJson(res, 401, { error: 'Netease cookie is invalid or expired', songs: [] });
-            return;
-          }
-
-          const likedPlaylist = userPlaylists.playlists[0];
-          const songs = await getPlaylistPlayableSongs(String(likedPlaylist.id), cookie, resultLimit);
-          writeJson(res, 200, { songs, playlist: likedPlaylist });
-        } catch (error) {
-          writeJson(res, 500, { error: 'Netease liked songs failed' });
-        }
-      });
-
-      server.middlewares.use('/api/netease/playlists', async (req: any, res: any) => {
-        try {
-          const cookie = readNeteaseCookie(req);
-          const userPlaylists = await getUserPlaylists(cookie);
-
-          if (!userPlaylists.valid) {
-            writeJson(res, 401, { error: 'Netease cookie is invalid or expired', playlists: [] });
-            return;
-          }
-
-          writeJson(res, 200, { playlists: userPlaylists.playlists.slice(1) });
-        } catch (error) {
-          writeJson(res, 500, { error: 'Netease playlists failed' });
-        }
-      });
-
-      server.middlewares.use('/api/netease/playlist', async (req: any, res: any) => {
+      server.middlewares.use('/api/qqmusic/lyric', async (req: any, res: any) => {
         try {
           const requestUrl = new URL(req.url || '', 'http://localhost');
           const id = requestUrl.searchParams.get('id');
-          const requestedLimit = Number(requestUrl.searchParams.get('limit') || '50');
-          const resultLimit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 80)) : 50;
-          const cookie = readNeteaseCookie(req);
+          const cookie = readQqMusicCookie(req);
 
           if (!id) {
             writeJson(res, 400, { error: 'Missing id' });
             return;
           }
 
-          const account = await getNeteaseAccount(cookie);
-          if (!account.valid) {
-            writeJson(res, 401, { error: 'Netease cookie is invalid or expired', songs: [] });
-            return;
-          }
-
-          const songs = await getPlaylistPlayableSongs(id, cookie, resultLimit);
-          writeJson(res, 200, { songs });
+          writeJson(res, 200, await getQqMusicLyric(id, cookie));
         } catch (error) {
-          writeJson(res, 500, { error: 'Netease playlist failed' });
+          writeJson(res, 500, { error: 'QQ Music lyric failed' });
         }
       });
 
-      server.middlewares.use('/api/netease/daily-recommend', async (req: any, res: any) => {
-        try {
-          const requestUrl = new URL(req.url || '', 'http://localhost');
-          const requestedLimit = Number(requestUrl.searchParams.get('limit') || '30');
-          const resultLimit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 50)) : 30;
-          const cookie = readNeteaseCookie(req);
-          const result = await getDailyRecommendSongs(cookie, resultLimit);
-
-          if (!result.valid) {
-            writeJson(res, 401, { error: 'Netease cookie is invalid or expired', songs: [] });
-            return;
-          }
-
-          writeJson(res, 200, { songs: result.songs });
-        } catch (error) {
-          writeJson(res, 500, { error: 'Netease daily recommend failed' });
-        }
-      });
-
-      server.middlewares.use('/api/netease/lyric', async (req: any, res: any) => {
+      server.middlewares.use('/api/qqmusic/url', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Pragma', 'no-cache');
         try {
           const requestUrl = new URL(req.url || '', 'http://localhost');
           const id = requestUrl.searchParams.get('id');
-          const cookie = readNeteaseCookie(req);
+          const cookie = readQqMusicCookie(req);
 
           if (!id) {
             writeJson(res, 400, { error: 'Missing id' });
             return;
           }
 
-          const response = await fetch(`https://music.163.com/api/song/lyric?id=${encodeURIComponent(id)}&lv=-1&kv=-1&tv=-1`, {
-            headers: createNeteaseHeaders(cookie),
-          });
-          const data = await response.json() as any;
-          writeJson(res, 200, {
-            lyric: data?.lrc?.lyric || '',
-            translatedLyric: data?.tlyric?.lyric || '',
-          });
+          writeJson(res, 200, { url: await getQqMusicPlayableUrl(id, cookie) });
         } catch (error) {
-          writeJson(res, 500, { error: 'Netease lyric failed' });
+          writeJson(res, 500, { error: 'QQ Music url failed' });
         }
       });
 
-      server.middlewares.use('/api/netease/url', async (req: any, res: any) => {
+      server.middlewares.use('/api/qqmusic/audio', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Pragma', 'no-cache');
         try {
           const requestUrl = new URL(req.url || '', 'http://localhost');
           const id = requestUrl.searchParams.get('id');
-          const cookie = readNeteaseCookie(req);
+          const cookie = readQqMusicCookie(req);
 
           if (!id) {
             writeJson(res, 400, { error: 'Missing id' });
             return;
           }
 
-          writeJson(res, 200, { url: await getNeteasePlayableUrlWithCookie(id, cookie) });
-        } catch (error) {
-          writeJson(res, 500, { error: 'Netease url failed' });
-        }
-      });
-
-      server.middlewares.use('/api/netease/audio', async (req: any, res: any) => {
-        try {
-          const requestUrl = new URL(req.url || '', 'http://localhost');
-          const id = requestUrl.searchParams.get('id');
-          const cookie = readNeteaseCookie(req);
-
-          if (!id) {
-            writeJson(res, 400, { error: 'Missing id' });
-            return;
-          }
-
-          const playableUrl = await getNeteasePlayableUrlWithCookie(id, cookie);
+          const playableUrl = await getQqMusicPlayableUrl(id, cookie);
           if (!playableUrl) {
             writeJson(res, 404, { error: 'No playable url for this song' });
             return;
           }
 
-          const headers: Record<string, string> = createNeteaseHeaders(cookie);
+          const headers: Record<string, string> = createQqMusicHeaders(cookie);
           if (req.headers.range) headers.Range = req.headers.range;
 
           const audioResponse = await fetch(playableUrl, { headers });
@@ -542,7 +746,7 @@ function neteaseApiPlugin() {
             res.end();
           }
         } catch (error) {
-          writeJson(res, 500, { error: 'Netease audio proxy failed' });
+          writeJson(res, 500, { error: 'QQ Music audio proxy failed' });
         }
       });
     },
@@ -551,20 +755,15 @@ function neteaseApiPlugin() {
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss(), neteaseApiPlugin()],
+    plugins: [react(), tailwindcss(), qqMusicApiPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modify芒聙聰file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
   };
 });
-
-

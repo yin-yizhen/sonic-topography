@@ -1,7 +1,7 @@
-package sonicserver
+﻿package sonicserver
 
 import (
-	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,10 +19,11 @@ import (
 	"time"
 )
 
-const neteaseCookieHeader = "x-netease-cookie"
+const qqMusicCookieHeader = "x-qq-music-cookie"
 
-var baseNeteaseHeaders = map[string]string{
-	"Referer":    "https://music.163.com/",
+var baseQqMusicHeaders = map[string]string{
+	"Referer":    "https://y.qq.com/",
+	"Origin":     "https://y.qq.com",
 	"User-Agent": "Mozilla/5.0",
 	"Accept":     "application/json, text/plain, */*",
 	"Connection": "close",
@@ -40,7 +41,7 @@ type Server struct {
 	client        *http.Client
 
 	mu                   sync.RWMutex
-	browserNeteaseCookie string
+	browserQqMusicCookie string
 	playableURLCache     map[string]cachedURL
 	searchCache          map[string]cachedSearch
 }
@@ -51,19 +52,20 @@ type Playlist struct {
 	Songs []map[string]any `json:"songs"`
 }
 
-type NeteaseSong struct {
-	ID       any    `json:"id"`
+type QqMusicSong struct {
+	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Artist   string `json:"artist"`
 	Album    string `json:"album"`
-	Duration any    `json:"duration"`
-	Fee      any    `json:"fee"`
+	Duration int    `json:"duration"`
+	Fee      int    `json:"fee"`
 }
 
-type Account struct {
-	Valid    bool   `json:"valid"`
-	UserID   any    `json:"userId"`
-	Nickname string `json:"nickname"`
+type QqMusicPlaylistSummary struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+	Cover string `json:"cover"`
 }
 
 type cachedURL struct {
@@ -77,7 +79,7 @@ type cachedSearch struct {
 }
 
 type searchPayload struct {
-	Songs         []NeteaseSong  `json:"songs"`
+	Songs         []QqMusicSong  `json:"songs"`
 	RawCount      int            `json:"rawCount"`
 	FilteredCount int            `json:"filteredCount"`
 	Debug         map[string]any `json:"debug,omitempty"`
@@ -110,7 +112,7 @@ func DefaultPlaylistsPath() string {
 	return filepath.Join(configDir, "SonicTopography", "playlists.json")
 }
 
-func NormalizeNeteaseCookie(value string) string {
+func NormalizeQqMusicCookie(value string) string {
 	lines := strings.FieldsFunc(value, func(r rune) bool {
 		return r == '\n' || r == '\r'
 	})
@@ -141,7 +143,7 @@ func NormalizePlaylists(value []Playlist) []Playlist {
 	for index, playlist := range value {
 		id := strings.TrimSpace(playlist.ID)
 		if id == "" {
-			id = fmt.Sprintf("playlist-%d", time.Now().UnixMilli()+int64(index))
+			id = fmt.Sprintf("playlist-%d", index)
 		}
 		name := strings.TrimSpace(playlist.Name)
 		if name == "" {
@@ -160,29 +162,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/playlists":
 		s.handlePlaylists(w, r)
-	case "/api/netease/cookie":
-		s.handleNeteaseCookie(w, r)
-	case "/api/netease/search":
-		s.handleNeteaseSearch(w, r)
-	case "/api/netease/liked":
-		s.handleNeteaseLiked(w, r)
-	case "/api/netease/playlists":
-		s.handleNeteasePlaylists(w, r)
-	case "/api/netease/playlist":
-		s.handleNeteasePlaylist(w, r)
-	case "/api/netease/daily-recommend":
-		s.handleNeteaseDailyRecommend(w, r)
-	case "/api/netease/lyric":
-		s.handleNeteaseLyric(w, r)
-	case "/api/netease/url":
-		s.handleNeteaseURL(w, r)
-	case "/api/netease/audio":
-		s.handleNeteaseAudio(w, r)
+	case "/api/qqmusic/cookie":
+		s.handleQqMusicCookie(w, r)
+	case "/api/qqmusic/search":
+		s.handleQqMusicSearch(w, r)
+	case "/api/qqmusic/daily-recommend":
+		s.handleQqMusicDailyRecommend(w, r)
+	case "/api/qqmusic/liked":
+		s.handleQqMusicLiked(w, r)
+	case "/api/qqmusic/playlists":
+		s.handleQqMusicCloudPlaylists(w, r)
+	case "/api/qqmusic/playlist":
+		s.handleQqMusicCloudPlaylist(w, r)
+	case "/api/qqmusic/lyric":
+		s.handleQqMusicLyric(w, r)
+	case "/api/qqmusic/url":
+		s.handleQqMusicURL(w, r)
+	case "/api/qqmusic/audio":
+		s.handleQqMusicAudio(w, r)
 	default:
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found"})
-			return
-		}
 		s.serveStatic(w, r)
 	}
 }
@@ -192,269 +190,334 @@ func (s *Server) handlePlaylists(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		playlists, err := s.readPlaylistsFile()
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Unable to read playlists"})
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Unable to read playlists"})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
 	case http.MethodPut:
-		var body struct {
+		var payload struct {
 			Playlists []Playlist `json:"playlists"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid playlists payload"})
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid playlist payload"})
 			return
 		}
-		playlists, err := s.writePlaylistsFile(body.Playlists)
+		playlists, err := s.writePlaylistsFile(payload.Playlists)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Unable to save playlists"})
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Unable to save playlists"})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
 	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", "GET, PUT")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
 	}
 }
 
-func (s *Server) handleNeteaseCookie(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleQqMusicCookie(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		account, err := s.getNeteaseAccount(s.currentCookie())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Unable to check Netease cookie"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"hasCookie": s.currentCookie() != "",
-			"valid":     account.Valid,
-			"userId":    account.UserID,
-			"nickname":  account.Nickname,
-		})
+		cookie := s.currentCookie()
+		writeJSON(w, http.StatusOK, s.validateQqMusicCookie(cookie))
 	case http.MethodPut:
-		var body struct {
+		var payload struct {
 			Cookie string `json:"cookie"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid cookie payload"})
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid cookie payload"})
 			return
 		}
-		normalized := NormalizeNeteaseCookie(body.Cookie)
+		normalized := NormalizeQqMusicCookie(payload.Cookie)
 		s.mu.Lock()
-		s.browserNeteaseCookie = normalized
+		s.browserQqMusicCookie = normalized
 		s.playableURLCache = make(map[string]cachedURL)
 		s.searchCache = make(map[string]cachedSearch)
 		s.mu.Unlock()
-
-		account, err := s.getNeteaseAccount(normalized)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Unable to save Netease cookie"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"hasCookie": normalized != "",
-			"valid":     account.Valid,
-			"userId":    account.UserID,
-			"nickname":  account.Nickname,
-		})
+		writeJSON(w, http.StatusOK, s.validateQqMusicCookie(normalized))
 	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", "GET, PUT")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
 	}
 }
 
-func (s *Server) handleNeteaseSearch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
+type qqMusicAuth struct {
+	Cookie           string
+	Uin              string
+	GTK              string
+	HasAuthToken     bool
+	HasLoginIdentity bool
+}
+
+func parseQqMusicCookie(cookie string) map[string]string {
+	entries := map[string]string{}
+	for _, part := range strings.Split(cookie, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		index := strings.Index(part, "=")
+		if index <= 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(part[:index]))
+		value := strings.TrimSpace(part[index+1:])
+		if key != "" {
+			entries[key] = value
+		}
 	}
+	return entries
+}
+
+func normalizeQqUin(value string) string {
+	digits := strings.Builder{}
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	result := digits.String()
+	if result == "" {
+		return "0"
+	}
+	return result
+}
+
+func extractUinFromCookie(cookie string) string {
+	entries := parseQqMusicCookie(cookie)
+	for _, key := range []string{"uin", "qqmusic_uin", "o_cookie", "luin"} {
+		if uin := normalizeQqUin(entries[key]); uin != "0" {
+			return uin
+		}
+	}
+	return "0"
+}
+
+func calculateQqGTK(seed string) string {
+	hash := int64(5381)
+	for _, r := range seed {
+		hash += (hash << 5) + int64(r)
+	}
+	return strconv.FormatInt(hash&0x7fffffff, 10)
+}
+
+func getQqMusicAuth(cookie string) qqMusicAuth {
+	normalized := NormalizeQqMusicCookie(cookie)
+	entries := parseQqMusicCookie(normalized)
+	uin := extractUinFromCookie(normalized)
+	gtkSeed := firstNonEmpty(entries["p_skey"], entries["skey"])
+	hasAuthToken := false
+	for _, key := range []string{"qqmusic_key", "qm_keyst", "music_key", "p_skey", "skey"} {
+		if strings.TrimSpace(entries[key]) != "" {
+			hasAuthToken = true
+			break
+		}
+	}
+	gtk := "5381"
+	if gtkSeed != "" {
+		gtk = calculateQqGTK(gtkSeed)
+	}
+	return qqMusicAuth{
+		Cookie:           normalized,
+		Uin:              uin,
+		GTK:              gtk,
+		HasAuthToken:     hasAuthToken,
+		HasLoginIdentity: normalized != "" && uin != "0" && hasAuthToken,
+	}
+}
+
+func (s *Server) validateQqMusicCookie(cookie string) map[string]any {
+	auth := getQqMusicAuth(cookie)
+	if auth.Cookie == "" {
+		return map[string]any{"hasCookie": false, "valid": false, "uin": "0", "reason": "empty-cookie"}
+	}
+	if auth.Uin == "0" {
+		return map[string]any{"hasCookie": true, "valid": false, "uin": "0", "reason": "missing-uin"}
+	}
+	if !auth.HasAuthToken {
+		return map[string]any{"hasCookie": true, "valid": false, "uin": auth.Uin, "reason": "missing-login-token"}
+	}
+
+	data := map[string]any{
+		"comm": map[string]any{"uin": auth.Uin, "format": "json", "ct": "19", "cv": "1859"},
+		"req": map[string]any{
+			"module": "music.UserInfo.userInfoServer",
+			"method": "GetLoginUserInfo",
+			"param":  map[string]any{},
+		},
+	}
+	encoded, _ := json.Marshal(data)
+	values := url.Values{}
+	values.Set("data", string(encoded))
+	endpoint := "https://u.y.qq.com/cgi-bin/musicu.fcg?" + values.Encode()
+	response, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(auth.Cookie, nil), 1)
+	if err != nil {
+		return map[string]any{"hasCookie": true, "valid": false, "uin": auth.Uin, "reason": "login-check-error"}
+	}
+	code := intFrom(firstNonNil(mapFrom(response["req"])["code"], response["code"], -1))
+	reason := "login-check-failed"
+	if code == 0 {
+		reason = "ok"
+	}
+	return map[string]any{"hasCookie": true, "valid": code == 0, "uin": auth.Uin, "reason": reason, "upstreamCode": code}
+}
+
+func (s *Server) handleQqMusicSearch(w http.ResponseWriter, r *http.Request) {
 	keywords := strings.TrimSpace(r.URL.Query().Get("keywords"))
 	if keywords == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing keywords"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Missing keywords"})
 		return
 	}
-	requestedLimit := parseIntDefault(r.URL.Query().Get("limit"), 30)
-	cookie := s.readNeteaseCookie(r)
-	hasCookie := cookie != ""
-	resultLimit := clamp(requestedLimit, 1, 40)
-	if !hasCookie {
-		resultLimit = clamp(requestedLimit, 1, 20)
-		if r.URL.Query().Get("limit") == "" {
-			resultLimit = 12
-		}
-	}
-	includeDebug := r.URL.Query().Get("debug") == "1"
-	searchMode := "anonymous-baseline"
-	if hasCookie {
-		searchMode = "cookie::" + cookie
-	}
-	cacheKey := strings.ToLower(keywords) + "::" + strconv.Itoa(resultLimit) + "::" + searchMode
-
+	limit := clamp(parseIntDefault(r.URL.Query().Get("limit"), 30), 1, 40)
+	cookie := s.readQqMusicCookie(r)
+	cacheKey := strings.ToLower(keywords) + "::" + strconv.Itoa(limit) + "::" + NormalizeQqMusicCookie(cookie)
 	if cached, ok := s.getCachedSearch(cacheKey); ok {
 		cached.Cached = true
-		if !includeDebug {
-			cached.Debug = nil
-		}
 		writeJSON(w, http.StatusOK, cached)
 		return
 	}
 
-	var rawMaps []map[string]any
-	debug := map[string]any{"mode": "anonymous-github"}
-	var err error
-	if hasCookie {
-		rawMaps, debug, err = s.fetchNeteaseSearchSongs(keywords, resultLimit, cookie)
-	} else {
-		rawMaps, err = s.fetchAnonymousNeteaseSearchSongs(keywords, resultLimit)
-	}
+	rawMaps, err := s.fetchQqMusicSearchSongs(keywords, limit, cookie)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Netease search failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "QQ Music search failed"})
 		return
 	}
-
-	rawSongs := make([]NeteaseSong, 0, len(rawMaps))
-	for _, song := range rawMaps {
-		rawSongs = append(rawSongs, mapNeteaseSong(song))
+	rawSongs := make([]QqMusicSong, 0, len(rawMaps))
+	for _, item := range rawMaps {
+		if song, ok := mapQqMusicSong(item); ok {
+			rawSongs = append(rawSongs, song)
+		}
 	}
-	songs := s.filterPlayableSongs(rawSongs, resultLimit, cookie)
+	songs := rawSongs
+	if len(songs) > limit {
+		songs = songs[:limit]
+	}
 	payload := searchPayload{Songs: songs, RawCount: len(rawSongs), FilteredCount: len(songs)}
-	if includeDebug {
-		payload.Debug = debug
-	}
 	if len(rawSongs) > 0 || len(songs) > 0 {
 		s.setCachedSearch(cacheKey, payload)
+	}
+	if r.URL.Query().Get("debug") == "1" {
+		payload.Debug = map[string]any{"rawCount": len(rawSongs)}
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
 
-func (s *Server) handleNeteaseLiked(w http.ResponseWriter, r *http.Request) {
-	resultLimit := clamp(parseIntDefault(r.URL.Query().Get("limit"), 50), 1, 80)
-	cookie := s.readNeteaseCookie(r)
-	userPlaylists, valid := s.getUserPlaylists(cookie)
-	if !valid || len(userPlaylists) == 0 {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Netease cookie is invalid or expired", "songs": []NeteaseSong{}})
-		return
-	}
-	likedPlaylist := userPlaylists[0]
-	songs, err := s.getPlaylistPlayableSongs(fmt.Sprint(likedPlaylist["id"]), cookie, resultLimit)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Netease liked songs failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"songs": songs, "playlist": likedPlaylist})
-}
-
-func (s *Server) handleNeteasePlaylists(w http.ResponseWriter, r *http.Request) {
-	cookie := s.readNeteaseCookie(r)
-	playlists, valid := s.getUserPlaylists(cookie)
-	if !valid {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Netease cookie is invalid or expired", "playlists": []map[string]any{}})
-		return
-	}
-	if len(playlists) > 1 {
-		playlists = playlists[1:]
-	} else {
-		playlists = []map[string]any{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
-}
-
-func (s *Server) handleNeteasePlaylist(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimSpace(r.URL.Query().Get("id"))
-	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing id"})
-		return
-	}
-	resultLimit := clamp(parseIntDefault(r.URL.Query().Get("limit"), 50), 1, 80)
-	cookie := s.readNeteaseCookie(r)
-	account, err := s.getNeteaseAccount(cookie)
-	if err != nil || !account.Valid {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Netease cookie is invalid or expired", "songs": []NeteaseSong{}})
-		return
-	}
-	songs, err := s.getPlaylistPlayableSongs(id, cookie, resultLimit)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Netease playlist failed"})
+func (s *Server) handleQqMusicDailyRecommend(w http.ResponseWriter, r *http.Request) {
+	cookie := s.readQqMusicCookie(r)
+	limit := clampQqLimit(r.URL.Query().Get("limit"), 50)
+	songs, errPayload := s.fetchQqMusicDailyRecommendations(cookie, limit)
+	if errPayload != nil {
+		writeJSON(w, http.StatusUnauthorized, errPayload)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"songs": songs})
 }
 
-func (s *Server) handleNeteaseDailyRecommend(w http.ResponseWriter, r *http.Request) {
-	resultLimit := clamp(parseIntDefault(r.URL.Query().Get("limit"), 30), 1, 50)
-	cookie := s.readNeteaseCookie(r)
-	result, valid := s.getDailyRecommendSongs(cookie, resultLimit)
-	if !valid {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Netease cookie is invalid or expired", "songs": []NeteaseSong{}})
+func (s *Server) handleQqMusicLiked(w http.ResponseWriter, r *http.Request) {
+	cookie := s.readQqMusicCookie(r)
+	limit := clampQqLimit(r.URL.Query().Get("limit"), 50)
+	songs, errPayload := s.fetchQqMusicLikedSongs(cookie, limit)
+	if errPayload != nil {
+		writeJSON(w, http.StatusUnauthorized, errPayload)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"songs": result})
+	writeJSON(w, http.StatusOK, map[string]any{"songs": songs})
 }
 
-func (s *Server) handleNeteaseLyric(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimSpace(r.URL.Query().Get("id"))
-	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing id"})
+func (s *Server) handleQqMusicCloudPlaylists(w http.ResponseWriter, r *http.Request) {
+	cookie := s.readQqMusicCookie(r)
+	limit := clampQqLimit(r.URL.Query().Get("limit"), 80)
+	playlists, errPayload := s.fetchQqMusicPlaylists(cookie, limit)
+	if errPayload != nil {
+		writeJSON(w, http.StatusUnauthorized, errPayload)
 		return
 	}
-	cookie := s.readNeteaseCookie(r)
-	endpoint := "https://music.163.com/api/song/lyric?id=" + url.QueryEscape(id) + "&lv=-1&kv=-1&tv=-1"
-	data, err := s.fetchJSON(endpoint, http.MethodGet, nil, createNeteaseHeaders(cookie, nil))
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Netease lyric failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"lyric":           stringFrom(nestedMap(data, "lrc")["lyric"]),
-		"translatedLyric": stringFrom(nestedMap(data, "tlyric")["lyric"]),
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
 }
 
-func (s *Server) handleNeteaseURL(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleQqMusicCloudPlaylist(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing id"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Missing id"})
 		return
 	}
-	cookie := s.readNeteaseCookie(r)
-	playableURL, err := s.getNeteasePlayableURL(id, cookie)
+	cookie := s.readQqMusicCookie(r)
+	if _, errPayload := s.ensureQqMusicLogin(cookie); errPayload != nil {
+		writeJSON(w, http.StatusUnauthorized, errPayload)
+		return
+	}
+	limit := clampQqLimit(r.URL.Query().Get("limit"), 50)
+	songs, err := s.fetchQqMusicPlaylistSongs(id, cookie, limit)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Netease url failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "QQ Music playlist songs failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"songs": songs})
+}
+
+func (s *Server) handleQqMusicLyric(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Missing id"})
+		return
+	}
+	lyric, translated, err := s.getQqMusicLyric(id, s.readQqMusicCookie(r))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "QQ Music lyric failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lyric": lyric, "translatedLyric": translated})
+}
+
+func (s *Server) handleQqMusicURL(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Missing id"})
+		return
+	}
+	playableURL, err := s.getQqMusicPlayableURL(id, s.readQqMusicCookie(r))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "QQ Music url failed"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"url": nullableString(playableURL)})
 }
 
-func (s *Server) handleNeteaseAudio(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleQqMusicAudio(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing id"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Missing id"})
 		return
 	}
-	cookie := s.readNeteaseCookie(r)
-	playableURL, err := s.getNeteasePlayableURL(id, cookie)
+	cookie := s.readQqMusicCookie(r)
+	playableURL, err := s.getQqMusicPlayableURL(id, cookie)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Netease audio proxy failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "QQ Music audio proxy failed"})
 		return
 	}
 	if playableURL == "" {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "No playable url for this song"})
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "No playable url for this song"})
 		return
 	}
-	headers := createNeteaseHeaders(cookie, nil)
-	if r.Header.Get("Range") != "" {
-		headers.Set("Range", r.Header.Get("Range"))
-	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, playableURL, nil)
+
+	req, err := http.NewRequest(http.MethodGet, playableURL, nil)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Netease audio proxy failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Invalid audio url"})
 		return
 	}
-	req.Header = headers
+	req.Header = createQqMusicHeaders(cookie, nil)
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Netease audio proxy failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Unable to fetch audio"})
 		return
 	}
 	defer resp.Body.Close()
-
 	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"} {
 		if value := resp.Header.Get(header); value != "" {
 			w.Header().Set(header, value)
@@ -484,54 +547,34 @@ func (s *Server) readPlaylistsFile() ([]Playlist, error) {
 
 func (s *Server) writePlaylistsFile(playlists []Playlist) ([]Playlist, error) {
 	normalized := NormalizePlaylists(playlists)
-	if err := os.MkdirAll(filepath.Dir(s.playlistsPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.playlistsPath), 0o755); err != nil {
 		return nil, err
 	}
 	raw, err := json.MarshalIndent(normalized, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(s.playlistsPath, raw, 0644); err != nil {
-		return nil, err
-	}
-	return normalized, nil
+	return normalized, os.WriteFile(s.playlistsPath, raw, 0o644)
 }
 
 func (s *Server) currentCookie() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.browserNeteaseCookie
+	return s.browserQqMusicCookie
 }
 
-func (s *Server) readNeteaseCookie(r *http.Request) string {
-	headerCookie := r.Header.Get(neteaseCookieHeader)
-	if headerCookie == "" {
+func (s *Server) readQqMusicCookie(r *http.Request) string {
+	headerCookie := r.Header.Get(qqMusicCookieHeader)
+	if strings.TrimSpace(headerCookie) == "" {
 		headerCookie = s.currentCookie()
 	}
-	return NormalizeNeteaseCookie(headerCookie)
+	return NormalizeQqMusicCookie(headerCookie)
 }
 
-func (s *Server) getNeteaseAccount(cookie string) (Account, error) {
-	normalized := NormalizeNeteaseCookie(cookie)
-	if normalized == "" {
-		return Account{}, nil
-	}
-	data, err := s.fetchJSON("https://music.163.com/api/nuser/account/get", http.MethodGet, nil, createNeteaseHeaders(normalized, nil))
-	if err != nil {
-		return Account{}, err
-	}
-	profile := nestedMap(data, "profile")
-	account := nestedMap(data, "account")
-	userID := firstNonNil(profile["userId"], account["id"])
-	return Account{
-		Valid:    userID != nil,
-		UserID:   userID,
-		Nickname: stringFrom(profile["nickname"]),
-	}, nil
-}
-
-func (s *Server) getNeteasePlayableURL(id string, cookie string) (string, error) {
-	normalized := NormalizeNeteaseCookie(cookie)
+func (s *Server) getQqMusicPlayableURL(id string, cookie string) (string, error) {
+	auth := getQqMusicAuth(cookie)
+	normalized := auth.Cookie
+	uin := auth.Uin
 	cacheKey := id + "::" + normalized
 	s.mu.RLock()
 	cached, ok := s.playableURLCache[cacheKey]
@@ -540,15 +583,44 @@ func (s *Server) getNeteasePlayableURL(id string, cookie string) (string, error)
 		return cached.URL, nil
 	}
 
-	endpoint := "https://music.163.com/api/song/enhance/player/url?id=" + url.QueryEscape(id) + "&ids=%5B" + url.QueryEscape(id) + "%5D&br=320000"
-	data, err := s.fetchJSONWithRetry(endpoint, http.MethodGet, nil, createNeteaseHeaders(normalized, nil), 2)
+	guid := strconv.FormatInt(time.Now().UnixNano()%9000000000+1000000000, 10)
+	data := map[string]any{
+		"req_0": map[string]any{
+			"module": "vkey.GetVkeyServer",
+			"method": "CgiGetVkey",
+			"param": map[string]any{
+				"guid":      guid,
+				"songmid":   []string{id},
+				"songtype":  []int{0},
+				"uin":       uin,
+				"loginflag": 1,
+				"platform":  "20",
+			},
+		},
+		"comm": map[string]any{"uin": uin, "format": "json", "ct": "19", "cv": "1859"},
+	}
+	encoded, _ := json.Marshal(data)
+	values := url.Values{}
+	values.Set("data", string(encoded))
+	endpoint := "https://u.y.qq.com/cgi-bin/musicu.fcg?" + values.Encode()
+
+	result, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(normalized, nil), 2)
 	if err != nil {
 		return "", err
 	}
+	vkeyData := mapFrom(mapFrom(result["req_0"])["data"])
+	infos := mapsFrom(sliceFrom(vkeyData["midurlinfo"]))
+	purl := ""
+	if len(infos) > 0 {
+		purl = stringFrom(infos[0]["purl"])
+	}
 	playableURL := ""
-	items := sliceFrom(data["data"])
-	if len(items) > 0 {
-		playableURL = stringFrom(mapFrom(items[0])["url"])
+	if purl != "" {
+		if strings.HasPrefix(purl, "http") {
+			playableURL = purl
+		} else {
+			playableURL = pickQqSip(sliceFrom(vkeyData["sip"])) + purl
+		}
 	}
 
 	s.mu.Lock()
@@ -557,220 +629,353 @@ func (s *Server) getNeteasePlayableURL(id string, cookie string) (string, error)
 	return playableURL, nil
 }
 
-func (s *Server) fetchNeteaseSearchSongs(keywords string, resultLimit int, cookie string) ([]map[string]any, map[string]any, error) {
-	upstreamLimit := minInt(resultLimit*5, 80)
-	body := url.Values{
-		"s":      {keywords},
-		"type":   {"1"},
-		"offset": {"0"},
-		"total":  {"true"},
-		"limit":  {strconv.Itoa(upstreamLimit)},
-		"_":      {strconv.FormatInt(time.Now().UnixMilli(), 10)},
+func (s *Server) fetchQqMusicSearchSongs(keywords string, resultLimit int, cookie string) ([]map[string]any, error) {
+	auth := getQqMusicAuth(cookie)
+	data := map[string]any{
+		"comm": map[string]any{"ct": "19", "cv": "1859", "uin": auth.Uin, "format": "json"},
+		"req": map[string]any{
+			"method": "DoSearchForQQMusicDesktop",
+			"module": "music.search.SearchCgiService",
+			"param": map[string]any{
+				"num_per_page": minInt(resultLimit*2, 60),
+				"page_num":     1,
+				"query":        keywords,
+				"search_type":  0,
+			},
+		},
 	}
-	headers := createNeteaseHeaders(cookie, http.Header{"Content-Type": {"application/x-www-form-urlencoded"}})
-	primary, err := s.fetchJSONWithRetry("https://music.163.com/api/search/get/web", http.MethodPost, strings.NewReader(body.Encode()), headers, 2)
-	if err != nil {
-		return nil, nil, err
-	}
-	primarySongs := mapsFrom(sliceFrom(nestedMap(primary, "result")["songs"]))
-
-	fallbackURL, _ := url.Parse("https://music.163.com/api/cloudsearch/pc")
-	query := fallbackURL.Query()
-	query.Set("s", keywords)
-	query.Set("type", "1")
-	query.Set("offset", "0")
-	query.Set("total", "true")
-	query.Set("limit", strconv.Itoa(upstreamLimit))
-	query.Set("_", strconv.FormatInt(time.Now().UnixMilli(), 10))
-	fallbackURL.RawQuery = query.Encode()
-	fallback, err := s.fetchJSONWithRetry(fallbackURL.String(), http.MethodGet, nil, createNeteaseHeaders(cookie, nil), 2)
-	if err != nil {
-		return nil, nil, err
-	}
-	fallbackSongs := mapsFrom(sliceFrom(nestedMap(fallback, "result")["songs"]))
-
-	byID := make(map[string]map[string]any)
-	for _, song := range append(primarySongs, fallbackSongs...) {
-		id := fmt.Sprint(song["id"])
-		if id != "" {
-			if _, exists := byID[id]; !exists {
-				byID[id] = song
-			}
-		}
-	}
-	songs := make([]map[string]any, 0, len(byID))
-	for _, song := range byID {
-		songs = append(songs, song)
-	}
-	return songs, map[string]any{
-		"primaryCode":   primary["code"],
-		"primaryCount":  len(primarySongs),
-		"fallbackCode":  fallback["code"],
-		"fallbackCount": len(fallbackSongs),
-	}, nil
-}
-
-func (s *Server) fetchAnonymousNeteaseSearchSongs(keywords string, resultLimit int) ([]map[string]any, error) {
-	body := url.Values{
-		"s":      {keywords},
-		"type":   {"1"},
-		"offset": {"0"},
-		"total":  {"true"},
-		"limit":  {strconv.Itoa(minInt(resultLimit*3, 60))},
-	}
-	headers := createNeteaseHeaders("", http.Header{"Content-Type": {"application/x-www-form-urlencoded"}})
-	data, err := s.fetchJSON("https://music.163.com/api/search/get/web", http.MethodPost, strings.NewReader(body.Encode()), headers)
+	encoded, _ := json.Marshal(data)
+	values := url.Values{}
+	values.Set("data", string(encoded))
+	endpoint := "https://u.y.qq.com/cgi-bin/musicu.fcg?" + values.Encode()
+	response, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(cookie, nil), 2)
 	if err != nil {
 		return nil, err
 	}
-	return mapsFrom(sliceFrom(nestedMap(data, "result")["songs"])), nil
+	list := sliceFrom(mapFrom(mapFrom(mapFrom(mapFrom(response["req"])["data"])["body"])["song"])["list"])
+	items := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		if mapped := mapFrom(item); len(mapped) > 0 {
+			items = append(items, mapped)
+		}
+	}
+	return items, nil
 }
-
-func (s *Server) filterPlayableSongs(rawSongs []NeteaseSong, resultLimit int, cookie string) []NeteaseSong {
-	playable := make([]NeteaseSong, 0, minInt(resultLimit, len(rawSongs)))
-	for index := 0; index < len(rawSongs) && len(playable) < resultLimit; index += 8 {
-		end := minInt(index+8, len(rawSongs))
-		type result struct {
-			song NeteaseSong
-			ok   bool
+func (s *Server) filterPlayableSongs(rawSongs []QqMusicSong, resultLimit int, cookie string) []QqMusicSong {
+	playable := make([]QqMusicSong, 0, minInt(resultLimit, len(rawSongs)))
+	for _, song := range rawSongs {
+		if len(playable) >= resultLimit {
+			break
 		}
-		results := make([]result, end-index)
-		var wg sync.WaitGroup
-		for offset, song := range rawSongs[index:end] {
-			wg.Add(1)
-			go func(i int, item NeteaseSong) {
-				defer wg.Done()
-				playableURL, err := s.getNeteasePlayableURL(fmt.Sprint(item.ID), cookie)
-				results[i] = result{song: item, ok: err == nil && playableURL != ""}
-			}(offset, song)
-		}
-		wg.Wait()
-		for _, result := range results {
-			if result.ok {
-				playable = append(playable, result.song)
-			}
-			if len(playable) >= resultLimit {
-				break
-			}
+		playableURL, err := s.getQqMusicPlayableURL(song.ID, cookie)
+		if err == nil && playableURL != "" {
+			playable = append(playable, song)
 		}
 	}
 	return playable
 }
 
-func (s *Server) getUserPlaylists(cookie string) ([]map[string]any, bool) {
-	account, err := s.getNeteaseAccount(cookie)
-	if err != nil || !account.Valid || account.UserID == nil {
-		return nil, false
-	}
-	endpoint := "https://music.163.com/api/user/playlist?uid=" + url.QueryEscape(fmt.Sprint(account.UserID)) + "&limit=100&offset=0"
-	data, err := s.fetchJSON(endpoint, http.MethodGet, nil, createNeteaseHeaders(cookie, nil))
-	if err != nil {
-		return nil, false
-	}
-	raw := mapsFrom(sliceFrom(data["playlist"]))
-	playlists := make([]map[string]any, 0, len(raw))
-	for _, playlist := range raw {
-		playlists = append(playlists, map[string]any{
-			"id":         playlist["id"],
-			"name":       stringFrom(playlist["name"]),
-			"trackCount": firstNonNil(playlist["trackCount"], 0),
-		})
-	}
-	return playlists, true
+func clampQqLimit(raw string, fallback int) int {
+	return clamp(parseIntDefault(raw, fallback), 1, 100)
 }
 
-func (s *Server) getPlaylistPlayableSongs(playlistID string, cookie string, resultLimit int) ([]NeteaseSong, error) {
-	endpoint := "https://music.163.com/api/v6/playlist/detail?id=" + url.QueryEscape(playlistID) + "&n=" + strconv.Itoa(resultLimit*2)
-	data, err := s.fetchJSON(endpoint, http.MethodGet, nil, createNeteaseHeaders(cookie, nil))
+func (s *Server) ensureQqMusicLogin(cookie string) (qqMusicAuth, map[string]any) {
+	result := s.validateQqMusicCookie(cookie)
+	if valid, _ := result["valid"].(bool); valid {
+		return getQqMusicAuth(cookie), nil
+	}
+	payload := map[string]any{"error": "QQ Music cookie is not valid"}
+	for key, value := range result {
+		payload[key] = value
+	}
+	return qqMusicAuth{}, payload
+}
+
+func (s *Server) fetchQqMusicCreatedPlaylists(cookie string, limit int) ([]QqMusicPlaylistSummary, error) {
+	auth := getQqMusicAuth(cookie)
+	values := url.Values{}
+	values.Set("hostuin", auth.Uin)
+	values.Set("sin", "0")
+	values.Set("size", strconv.Itoa(limit))
+	values.Set("format", "json")
+	values.Set("g_tk", auth.GTK)
+	values.Set("loginUin", auth.Uin)
+	values.Set("hostUin", auth.Uin)
+	values.Set("platform", "yqq.json")
+	values.Set("needNewCode", "0")
+	endpoint := "https://c.y.qq.com/rsc/fcgi-bin/fcg_user_created_diss?" + values.Encode()
+	data, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(cookie, nil), 2)
 	if err != nil {
 		return nil, err
 	}
-	tracks := mapsFrom(sliceFrom(nestedMap(data, "playlist")["tracks"]))
-	rawSongs := make([]NeteaseSong, 0, len(tracks))
-	for _, track := range tracks {
-		rawSongs = append(rawSongs, mapNeteaseSong(track))
-	}
-	return s.filterPlayableSongs(rawSongs, resultLimit, cookie), nil
+	list := firstNonNil(mapFrom(data["data"])["disslist"], data["disslist"], mapFrom(data["data"])["list"])
+	return mapQqMusicPlaylists(sliceFrom(list)), nil
 }
 
-func (s *Server) getDailyRecommendSongs(cookie string, resultLimit int) ([]NeteaseSong, bool) {
-	if NormalizeNeteaseCookie(cookie) == "" {
-		return nil, false
-	}
-	account, err := s.getNeteaseAccount(cookie)
-	if err != nil || !account.Valid {
-		return nil, false
-	}
-	data, err := s.fetchJSON("https://music.163.com/api/v3/discovery/recommend/songs", http.MethodGet, nil, createNeteaseHeaders(cookie, nil))
+func (s *Server) fetchQqMusicFavoritePlaylists(cookie string, limit int) ([]QqMusicPlaylistSummary, error) {
+	auth := getQqMusicAuth(cookie)
+	values := url.Values{}
+	values.Set("ct", "20")
+	values.Set("cid", "205360956")
+	values.Set("userid", auth.Uin)
+	values.Set("reqtype", "3")
+	values.Set("sin", "0")
+	values.Set("ein", strconv.Itoa(maxInt(0, limit-1)))
+	values.Set("format", "json")
+	values.Set("g_tk", auth.GTK)
+	values.Set("loginUin", auth.Uin)
+	values.Set("hostUin", auth.Uin)
+	values.Set("platform", "yqq.json")
+	values.Set("needNewCode", "0")
+	endpoint := "https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg?" + values.Encode()
+	data, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(cookie, nil), 2)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	raw := mapsFrom(sliceFrom(nestedMap(data, "data")["dailySongs"]))
-	if len(raw) == 0 {
-		raw = mapsFrom(sliceFrom(data["recommend"]))
-	}
-	if len(raw) == 0 {
-		return nil, false
-	}
-	songs := make([]NeteaseSong, 0, len(raw))
-	for _, song := range raw {
-		songs = append(songs, mapNeteaseSong(song))
-	}
-	return s.filterPlayableSongs(songs, resultLimit, cookie), true
+	list := firstNonNil(mapFrom(data["data"])["cdlist"], mapFrom(data["data"])["list"], mapFrom(data["data"])["v_list"], data["cdlist"], data["list"])
+	return mapQqMusicPlaylists(sliceFrom(list)), nil
 }
 
-func (s *Server) fetchJSONWithRetry(endpoint string, method string, body io.Reader, headers http.Header, retries int) (map[string]any, error) {
-	var last map[string]any
-	var lastErr error
-	var bodyBytes []byte
-	if body != nil {
-		bodyBytes, _ = io.ReadAll(body)
+func (s *Server) fetchQqMusicPlaylists(cookie string, limit int) ([]QqMusicPlaylistSummary, map[string]any) {
+	if _, errPayload := s.ensureQqMusicLogin(cookie); errPayload != nil {
+		return nil, errPayload
 	}
-	for attempt := 0; attempt <= retries; attempt++ {
-		var reader io.Reader
-		if bodyBytes != nil {
-			reader = bytes.NewReader(bodyBytes)
+	created, _ := s.fetchQqMusicCreatedPlaylists(cookie, limit)
+	favorites, _ := s.fetchQqMusicFavoritePlaylists(cookie, limit)
+	playlists := uniqueQqMusicPlaylists(append(created, favorites...))
+	return playlists[:minInt(len(playlists), limit)], nil
+}
+
+func (s *Server) fetchQqMusicPlaylistSongs(id string, cookie string, limit int) ([]QqMusicSong, error) {
+	auth := getQqMusicAuth(cookie)
+	values := url.Values{}
+	values.Set("type", "1")
+	values.Set("json", "1")
+	values.Set("utf8", "1")
+	values.Set("onlysong", "0")
+	values.Set("disstid", id)
+	values.Set("format", "json")
+	values.Set("g_tk", auth.GTK)
+	values.Set("loginUin", auth.Uin)
+	values.Set("hostUin", auth.Uin)
+	values.Set("platform", "yqq.json")
+	values.Set("needNewCode", "0")
+	endpoint := "https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?" + values.Encode()
+	data, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(cookie, nil), 2)
+	if err != nil {
+		return nil, err
+	}
+	cdList := mapsFrom(sliceFrom(data["cdlist"]))
+	if len(cdList) == 0 {
+		return []QqMusicSong{}, nil
+	}
+	return mapQqMusicSongs(sliceFrom(cdList[0]["songlist"]), limit), nil
+}
+
+func (s *Server) fetchQqMusicFavoriteSongs(cookie string, limit int) []QqMusicSong {
+	auth := getQqMusicAuth(cookie)
+	for _, reqtype := range []string{"0", "1", "2"} {
+		values := url.Values{}
+		values.Set("ct", "20")
+		values.Set("cid", "205360956")
+		values.Set("userid", auth.Uin)
+		values.Set("reqtype", reqtype)
+		values.Set("sin", "0")
+		values.Set("ein", strconv.Itoa(maxInt(0, limit-1)))
+		values.Set("format", "json")
+		values.Set("g_tk", auth.GTK)
+		values.Set("loginUin", auth.Uin)
+		values.Set("hostUin", auth.Uin)
+		values.Set("platform", "yqq.json")
+		values.Set("needNewCode", "0")
+		endpoint := "https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg?" + values.Encode()
+		data, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(cookie, nil), 2)
+		if err != nil {
+			continue
 		}
-		data, err := s.fetchJSON(endpoint, method, reader, headers)
-		last = data
-		lastErr = err
-		if err == nil && fmt.Sprint(data["code"]) != "400" {
+		list := firstNonNil(mapFrom(data["data"])["list"], mapFrom(data["data"])["songlist"], data["list"])
+		songs := make([]QqMusicSong, 0)
+		for _, item := range sliceFrom(list) {
+			mapped := mapFrom(item)
+			candidate := mapped
+			if nested := mapFrom(firstNonNil(mapped["song"], mapped["musicData"])); len(nested) > 0 {
+				candidate = nested
+			}
+			if song, ok := mapQqMusicSong(candidate); ok {
+				songs = append(songs, song)
+			}
+		}
+		if len(songs) > 0 {
+			return songs[:minInt(len(songs), limit)]
+		}
+	}
+	return []QqMusicSong{}
+}
+
+func (s *Server) fetchQqMusicLikedSongs(cookie string, limit int) ([]QqMusicSong, map[string]any) {
+	if _, errPayload := s.ensureQqMusicLogin(cookie); errPayload != nil {
+		return nil, errPayload
+	}
+	if songs := s.fetchQqMusicFavoriteSongs(cookie, limit); len(songs) > 0 {
+		return songs, nil
+	}
+	playlists, errPayload := s.fetchQqMusicPlaylists(cookie, 100)
+	if errPayload != nil {
+		return nil, errPayload
+	}
+	for _, playlist := range playlists {
+		name := strings.ToLower(playlist.Name)
+		if strings.Contains(name, "liked") || strings.Contains(name, "favorite") || strings.Contains(name, "love") || strings.Contains(playlist.Name, "\u6211\u559c\u6b22") || strings.Contains(playlist.Name, "\u559c\u6b61") {
+			songs, _ := s.fetchQqMusicPlaylistSongs(playlist.ID, cookie, limit)
+			return songs, nil
+		}
+	}
+	return []QqMusicSong{}, nil
+}
+
+func collectRecommendPlaylistIDs(value any, output []string) []string {
+	if output == nil {
+		output = []string{}
+	}
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			output = collectRecommendPlaylistIDs(item, output)
+		}
+	case map[string]any:
+		id := strings.TrimSpace(firstNonEmpty(stringFrom(typed["id"]), stringFrom(typed["disstid"])))
+		jumpType := intFrom(typed["jumptype"])
+		cardType := intFrom(typed["type"])
+		if id != "" && (jumpType == 10014 || cardType == 500) && !stringSliceContains(output, id) {
+			output = append(output, id)
+		}
+		for _, nested := range typed {
+			output = collectRecommendPlaylistIDs(nested, output)
+		}
+	}
+	return output
+}
+
+func (s *Server) fetchQqMusicDailyRecommendations(cookie string, limit int) ([]QqMusicSong, map[string]any) {
+	if _, errPayload := s.ensureQqMusicLogin(cookie); errPayload != nil {
+		return nil, errPayload
+	}
+	auth := getQqMusicAuth(cookie)
+	data := map[string]any{
+		"comm": map[string]any{"ct": "19", "cv": "1859", "uin": auth.Uin, "format": "json"},
+		"req": map[string]any{
+			"module": "music.recommend.RecommendFeed",
+			"method": "get_recommend_feed",
+			"param":  map[string]any{"page": 1, "direction": 0, "last_id": "0"},
+		},
+	}
+	encoded, _ := json.Marshal(data)
+	values := url.Values{}
+	values.Set("data", string(encoded))
+	endpoint := "https://u.y.qq.com/cgi-bin/musicu.fcg?" + values.Encode()
+	response, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(cookie, nil), 2)
+	if err != nil {
+		return []QqMusicSong{}, nil
+	}
+	ids := collectRecommendPlaylistIDs(mapFrom(mapFrom(response["req"])["data"]), nil)
+	for index, id := range ids {
+		if index >= 8 {
+			break
+		}
+		songs, err := s.fetchQqMusicPlaylistSongs(id, cookie, limit)
+		if err == nil && len(songs) > 0 {
+			return songs, nil
+		}
+	}
+	return []QqMusicSong{}, nil
+}
+
+func (s *Server) getQqMusicLyric(id string, cookie string) (string, string, error) {
+	values := url.Values{}
+	values.Set("songmid", id)
+	values.Set("pcachetime", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	auth := getQqMusicAuth(cookie)
+	values.Set("g_tk", auth.GTK)
+	values.Set("loginUin", auth.Uin)
+	values.Set("hostUin", auth.Uin)
+	values.Set("format", "json")
+	values.Set("inCharset", "utf8")
+	values.Set("outCharset", "utf-8")
+	values.Set("notice", "0")
+	values.Set("platform", "yqq.json")
+	values.Set("needNewCode", "0")
+	values.Set("nobase64", "1")
+	endpoint := "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?" + values.Encode()
+	data, err := s.fetchJSONWithRetry(endpoint, createQqMusicHeaders(cookie, nil), 2)
+	if err != nil {
+		return "", "", err
+	}
+	return decodeMaybeBase64(stringFrom(data["lyric"])), decodeMaybeBase64(stringFrom(data["trans"])), nil
+}
+
+func (s *Server) fetchJSONWithRetry(endpoint string, headers http.Header, retries int) (map[string]any, error) {
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		data, err := s.fetchJSON(endpoint, headers)
+		if err == nil {
 			return data, nil
 		}
+		lastErr = err
 		if attempt < retries {
 			time.Sleep(time.Duration(180*(attempt+1)) * time.Millisecond)
 		}
 	}
-	if last != nil {
-		return last, nil
-	}
 	return nil, lastErr
 }
 
-func (s *Server) fetchJSON(endpoint string, method string, body io.Reader, headers http.Header) (map[string]any, error) {
-	req, err := http.NewRequest(method, endpoint, body)
+func (s *Server) fetchJSON(endpoint string, headers http.Header) (map[string]any, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header = headers.Clone()
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var data map[string]any
-	decoder := json.NewDecoder(resp.Body)
-	decoder.UseNumber()
-	if err := decoder.Decode(&data); err != nil {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return nil, err
 	}
-	return data, nil
+	if resp.StatusCode >= 500 {
+		return nil, fmt.Errorf("upstream status %d", resp.StatusCode)
+	}
+	return parseJSONLike(raw)
+}
+
+func parseJSONLike(raw []byte) (map[string]any, error) {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return map[string]any{}, nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(text), &data); err == nil {
+		return data, nil
+	}
+	start := strings.Index(text, "(")
+	end := strings.LastIndex(text, ")")
+	if start >= 0 && end > start {
+		if err := json.Unmarshal([]byte(text[start+1:end]), &data); err == nil {
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("invalid json response")
 }
 
 func (s *Server) getCachedSearch(key string) (searchPayload, bool) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	cached, ok := s.searchCache[key]
-	s.mu.RUnlock()
 	if !ok || cached.ExpiresAt.Before(time.Now()) {
 		return searchPayload{}, false
 	}
@@ -779,55 +984,64 @@ func (s *Server) getCachedSearch(key string) (searchPayload, bool) {
 
 func (s *Server) setCachedSearch(key string, payload searchPayload) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.searchCache[key] = cachedSearch{Payload: payload, ExpiresAt: time.Now().Add(5 * time.Minute)}
-	s.mu.Unlock()
 }
 
 func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
-	if s.staticFS == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Static files are not embedded"})
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "Not found"})
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	if s.staticFS == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "Static files are not embedded"})
 		return
 	}
 	name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
-	if name == "" || name == "." {
-		name = "index.html"
+	if name == "" || strings.HasSuffix(r.URL.Path, "/") {
+		name = path.Join(name, "index.html")
 	}
-	if !s.tryServeStaticFile(w, name) {
-		s.tryServeStaticFile(w, "index.html")
+	if s.tryServeStaticFile(w, r, name) {
+		return
 	}
+	if !strings.Contains(path.Base(name), ".") && s.tryServeStaticFile(w, r, "index.html") {
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "Not found"})
 }
 
-func (s *Server) tryServeStaticFile(w http.ResponseWriter, name string) bool {
+func (s *Server) tryServeStaticFile(w http.ResponseWriter, r *http.Request, name string) bool {
 	file, err := s.staticFS.Open(name)
 	if err != nil {
 		return false
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || info.IsDir() {
+	stat, err := file.Stat()
+	if err != nil || stat.IsDir() {
 		return false
 	}
-	raw, err := io.ReadAll(file)
-	if err != nil {
-		return false
-	}
-	if contentType := mime.TypeByExtension(filepath.Ext(name)); contentType != "" {
+	if contentType := mime.TypeByExtension(path.Ext(name)); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	_, _ = w.Write(raw)
+	reader, ok := file.(io.ReadSeeker)
+	if !ok {
+		data, err := io.ReadAll(file)
+		if err != nil {
+			return false
+		}
+		http.ServeContent(w, r, name, stat.ModTime(), strings.NewReader(string(data)))
+		return true
+	}
+	http.ServeContent(w, r, name, stat.ModTime(), reader)
 	return true
 }
 
-func createNeteaseHeaders(cookie string, extra http.Header) http.Header {
+func createQqMusicHeaders(cookie string, extra http.Header) http.Header {
 	headers := http.Header{}
-	for key, value := range baseNeteaseHeaders {
+	for key, value := range baseQqMusicHeaders {
 		headers.Set(key, value)
 	}
-	if normalized := NormalizeNeteaseCookie(cookie); normalized != "" {
+	if normalized := NormalizeQqMusicCookie(cookie); normalized != "" {
 		headers.Set("Cookie", normalized)
 	}
 	for key, values := range extra {
@@ -838,35 +1052,131 @@ func createNeteaseHeaders(cookie string, extra http.Header) http.Header {
 	return headers
 }
 
-func mapNeteaseSong(song map[string]any) NeteaseSong {
-	artists := mapsFrom(sliceFrom(firstNonNil(song["artists"], song["ar"])))
-	artistNames := make([]string, 0, len(artists))
-	for _, artist := range artists {
-		if name := stringFrom(artist["name"]); name != "" {
+func mapQqMusicPlaylist(raw map[string]any) (QqMusicPlaylistSummary, bool) {
+	id := strings.TrimSpace(firstNonEmpty(
+		stringFrom(raw["disstid"]),
+		stringFrom(raw["tid"]),
+		stringFrom(raw["dissid"]),
+		stringFrom(raw["id"]),
+		stringFrom(raw["dirid"]),
+	))
+	name := strings.TrimSpace(firstNonEmpty(
+		stringFrom(raw["dissname"]),
+		stringFrom(raw["diss_name"]),
+		stringFrom(raw["title"]),
+		stringFrom(raw["name"]),
+		stringFrom(raw["dirname"]),
+	))
+	if id == "" || name == "" {
+		return QqMusicPlaylistSummary{}, false
+	}
+	return QqMusicPlaylistSummary{
+		ID:    id,
+		Name:  name,
+		Count: intFrom(firstNonNil(raw["song_cnt"], raw["songnum"], raw["total_song_num"], raw["song_count"], raw["count"])),
+		Cover: firstNonEmpty(stringFrom(raw["logo"]), stringFrom(raw["diss_cover"]), stringFrom(raw["cover"]), stringFrom(raw["picurl"]), stringFrom(raw["dir_pic_url2"])),
+	}, true
+}
+
+func mapQqMusicPlaylists(values []any) []QqMusicPlaylistSummary {
+	playlists := make([]QqMusicPlaylistSummary, 0, len(values))
+	for _, value := range values {
+		if playlist, ok := mapQqMusicPlaylist(mapFrom(value)); ok {
+			playlists = append(playlists, playlist)
+		}
+	}
+	return playlists
+}
+
+func uniqueQqMusicPlaylists(values []QqMusicPlaylistSummary) []QqMusicPlaylistSummary {
+	seen := map[string]bool{}
+	result := make([]QqMusicPlaylistSummary, 0, len(values))
+	for _, playlist := range values {
+		if playlist.ID == "" || seen[playlist.ID] {
+			continue
+		}
+		seen[playlist.ID] = true
+		result = append(result, playlist)
+	}
+	return result
+}
+
+func mapQqMusicSongs(values []any, limit int) []QqMusicSong {
+	songs := make([]QqMusicSong, 0, minInt(len(values), limit))
+	for _, value := range values {
+		if len(songs) >= limit {
+			break
+		}
+		if song, ok := mapQqMusicSong(mapFrom(value)); ok {
+			songs = append(songs, song)
+		}
+	}
+	return songs
+}
+
+func mapQqMusicSong(song map[string]any) (QqMusicSong, bool) {
+	id := strings.TrimSpace(firstNonEmpty(
+		stringFrom(song["mid"]),
+		stringFrom(song["songmid"]),
+		stringFrom(song["songMid"]),
+		stringFrom(mapFrom(song["file"])["media_mid"]),
+		stringFrom(song["strMediaMid"]),
+	))
+	name := strings.TrimSpace(firstNonEmpty(stringFrom(song["title"]), stringFrom(song["name"]), stringFrom(song["songname"])))
+	if id == "" || name == "" {
+		return QqMusicSong{}, false
+	}
+	singers := mapsFrom(sliceFrom(firstNonNil(song["singer"], song["singers"])))
+	artistNames := make([]string, 0, len(singers))
+	for _, singer := range singers {
+		if name := stringFrom(singer["name"]); name != "" {
 			artistNames = append(artistNames, name)
 		}
 	}
-	album := mapFrom(firstNonNil(song["album"], song["al"]))
-	return NeteaseSong{
-		ID:       song["id"],
-		Name:     stringFrom(song["name"]),
-		Artist:   strings.Join(artistNames, " / "),
-		Album:    stringFrom(album["name"]),
-		Duration: firstNonNil(song["duration"], song["dt"], 0),
-		Fee:      song["fee"],
+	album := mapFrom(song["album"])
+	durationSeconds := intFrom(firstNonNil(song["interval"], song["duration"]))
+	fee := 0
+	if intFrom(firstNonNil(mapFrom(song["pay"])["pay_play"], mapFrom(song["pay"])["payplay"])) > 0 {
+		fee = 1
 	}
+	return QqMusicSong{
+		ID:       id,
+		Name:     name,
+		Artist:   strings.Join(artistNames, " / "),
+		Album:    firstNonEmpty(stringFrom(album["name"]), stringFrom(album["title"]), stringFrom(song["albumname"])),
+		Duration: durationSeconds * 1000,
+		Fee:      fee,
+	}, true
 }
 
-func writeJSON(w http.ResponseWriter, status int, value any) {
+func pickQqSip(values []any) string {
+	for _, value := range values {
+		candidate := stringFrom(value)
+		if strings.HasPrefix(candidate, "http") {
+			return candidate
+		}
+	}
+	return "https://isure.stream.qqmusic.qq.com/"
+}
+
+func decodeMaybeBase64(value string) string {
+	if value == "" || strings.Contains(value, "[") {
+		return value
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return value
+	}
+	return string(decoded)
+}
+
+func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func parseIntDefault(raw string, fallback int) int {
-	if raw == "" {
-		return fallback
-	}
 	value, err := strconv.Atoi(raw)
 	if err != nil {
 		return fallback
@@ -891,6 +1201,22 @@ func minInt(a int, b int) int {
 	return b
 }
 
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func stringSliceContains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func nullableString(value string) any {
 	if value == "" {
 		return nil
@@ -898,53 +1224,85 @@ func nullableString(value string) any {
 	return value
 }
 
-func nestedMap(value map[string]any, key string) map[string]any {
-	return mapFrom(value[key])
-}
-
 func mapFrom(value any) map[string]any {
-	if typed, ok := value.(map[string]any); ok {
-		return typed
+	if mapped, ok := value.(map[string]any); ok {
+		return mapped
 	}
 	return map[string]any{}
 }
 
 func sliceFrom(value any) []any {
-	if typed, ok := value.([]any); ok {
-		return typed
+	if values, ok := value.([]any); ok {
+		return values
 	}
 	return []any{}
 }
 
 func mapsFrom(values []any) []map[string]any {
-	mapped := make([]map[string]any, 0, len(values))
+	result := make([]map[string]any, 0, len(values))
 	for _, value := range values {
-		if item, ok := value.(map[string]any); ok {
-			mapped = append(mapped, item)
+		if mapped := mapFrom(value); len(mapped) > 0 {
+			result = append(result, mapped)
 		}
 	}
-	return mapped
+	return result
 }
 
 func stringFrom(value any) string {
-	if value == nil {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	case float64:
+		if typed == float64(int64(typed)) {
+			return strconv.FormatInt(int64(typed), 10)
+		}
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case json.Number:
+		return typed.String()
+	default:
 		return ""
 	}
-	if typed, ok := value.(string); ok {
+}
+
+func intFrom(value any) int {
+	switch typed := value.(type) {
+	case int:
 		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return int(parsed)
+	case string:
+		parsed, _ := strconv.Atoi(typed)
+		return parsed
+	default:
+		return 0
 	}
-	return fmt.Sprint(value)
 }
 
 func firstNonNil(values ...any) any {
 	for _, value := range values {
-		if value == nil {
-			continue
+		if value != nil {
+			return value
 		}
-		if slice, ok := value.([]any); ok && len(slice) == 0 {
-			continue
-		}
-		return value
 	}
 	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
