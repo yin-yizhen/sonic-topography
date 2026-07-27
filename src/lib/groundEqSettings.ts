@@ -199,7 +199,13 @@ export function deriveTerrainGridSettings(terrainDensity: unknown) {
     density,
     gridSize,
     spacing,
-    boxWidth: spacing * (0.9 / 1.05),
+    // Pillars fill their whole cell. A narrower box leaves a gap between pillars,
+    // and since nothing closes the terrain from below, a grazing ray that lines up
+    // with a grid axis slips down that gap, exits beneath the terrain and paints the
+    // page backdrop as a hard line converging on the vanishing point. The per-cell
+    // grid look survives either way: it comes from the top-face edge glow in the
+    // terrain shader, not from the physical gap.
+    boxWidth: spacing,
     instanceCount: gridSize * gridSize,
     terrainSize: TERRAIN_BASE_SIZE,
   };
