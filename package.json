@@ -16,6 +16,8 @@
     "build": "vite build",
     "build:electron": "npm run build && electron-builder --win nsis",
     "build:electron:dir": "npm run build && electron-builder --win dir",
+    "build:electron:mac": "npm run build && electron-builder --mac dmg",
+    "build:electron:mac:dir": "npm run build && electron-builder --mac dir",
     "start": "electron .",
     "preview": "vite preview",
     "lint": "tsc --noEmit"
@@ -35,6 +37,34 @@
       "package.json"
     ],
     "asar": true,
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.music",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
     "win": {
       "icon": "build/icon.ico",
       "executableName": "SonicTopography",
